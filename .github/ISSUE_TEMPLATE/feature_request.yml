@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest a capability for Conversation Tree.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation, not only the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like it to do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+    validations:
+      required: false
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DSH version
+      placeholder: "0.2.1-rc.3"
+    validations:
+      required: false
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This is about organising conversations (workspace / topic / tree), not about editing message branches inside one conversation.
+          required: false

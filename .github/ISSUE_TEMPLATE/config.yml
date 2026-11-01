@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: npm package page
+    url: https://www.npmjs.com/package/dsh-conversation-tree
+    about: Version history, README and install metadata.
+  - name: Plugin index (Discover)
+    url: https://cdn.jsdelivr.net/gh/chriswang/dsh-plugins-index@main/index.json
+    about: The index source to add under Plugins → Discover → Index sources.
