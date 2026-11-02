@@ -6,7 +6,7 @@ English | [中文](README.zh.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-%3E%3D0.2.1--rc.3-blue)](package.json)
 [![dsh.so L5](https://img.shields.io/badge/dsh.so-L5%20verified-d4af37)](https://www.dsh.so/artifact/dsh-conversation-tree-2/)
-[![awesome-dsh-plugin](https://img.shields.io/badge/awesome--dsh--plugin-listed-8a2be2)](https://awesome-dsh-plugin.com/p/chriswang/dsh-conversation-tree/)
+[![awesome-dsh-plugin](https://img.shields.io/badge/awesome--dsh--plugin-listed-8a2be2)](https://awesome-dsh-plugin.com/)
 
 ![The Conversation Tree panel with demo data: Workspaces, topics, conversations and status marks](assets/promo/hero.png)
 
@@ -31,7 +31,7 @@ Then **restart DSH**. The band starts collapsed: a 28×28 icon appears in the co
 In DSH: **Plugins → Discover → Index sources**, add:
 
 ```
-https://cdn.jsdelivr.net/gh/chriswang/dsh-plugins-index@main/index.json
+https://cdn.jsdelivr.net/gh/orchivo/dsh-plugins-index@main/index.json
 ```
 
 The index is served over jsDelivr's CDN; adding it to Discover makes the plugin installable from the UI.
@@ -44,7 +44,7 @@ Paste this into a DSH conversation:
 Install the DSH plugin dsh-conversation-tree for me:
 1. Run `dsh plugin --profile web add dsh-conversation-tree`.
 2. If it is not found, add the plugin index source
-   https://cdn.jsdelivr.net/gh/chriswang/dsh-plugins-index@main/index.json
+   https://cdn.jsdelivr.net/gh/orchivo/dsh-plugins-index@main/index.json
    in Plugins → Discover → Index sources, then install it there.
 3. Tell me to restart DSH when you are done.
 ```
@@ -83,7 +83,7 @@ There are two different plugins with a similar name, and they solve opposite pro
 | Changes DSH UI | Adds a side band only; product UI untouched | Different data model for replies |
 | Model tools | 9 tools over the conversation tree | — |
 
-On **dsh.so** the canonical slug `/artifact/dsh-conversation-tree/` belongs to Unintendedz, so look for **`@chriswang/dsh-conversation-tree`** — our page is [`/artifact/dsh-conversation-tree-2/`](https://www.dsh.so/artifact/dsh-conversation-tree-2/).
+On **dsh.so** the canonical slug `/artifact/dsh-conversation-tree/` belongs to Unintendedz (a different plugin) — our page is [`/artifact/dsh-conversation-tree-2/`](https://www.dsh.so/artifact/dsh-conversation-tree-2/).
 
 ## Security & privacy
 
@@ -146,7 +146,7 @@ dsh plugin --profile web remove dsh-conversation-tree
 
 **Can it touch my files or run commands?** No. The tools only read/write the conversation tree document; there is no shell or filesystem access in the tools.
 
-**Where is the source?** <https://github.com/chriswang/dsh-conversation-tree>. Published to npm prebuilt; building from source needs a DSH source checkout because the project carries no npm dependencies (the bundler and type declarations are borrowed from that checkout).
+**Where is the source?** <https://github.com/orchivo/dsh-conversation-tree>. Published to npm prebuilt; building from source needs a DSH source checkout because the project carries no npm dependencies (the bundler and type declarations are borrowed from that checkout).
 
 ## License
 

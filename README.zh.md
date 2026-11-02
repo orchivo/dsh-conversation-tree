@@ -6,7 +6,7 @@
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-%3E%3D0.2.1--rc.3-blue)](package.json)
 [![dsh.so L5](https://img.shields.io/badge/dsh.so-L5%20verified-d4af37)](https://www.dsh.so/zh/artifact/dsh-conversation-tree-2/)
-[![awesome-dsh-plugin](https://img.shields.io/badge/awesome--dsh--plugin-listed-8a2be2)](https://awesome-dsh-plugin.com/p/chriswang/dsh-conversation-tree/)
+[![awesome-dsh-plugin](https://img.shields.io/badge/awesome--dsh--plugin-listed-8a2be2)](https://awesome-dsh-plugin.com/)
 
 ![对话树面板的界面示意（演示数据，已脱敏）：工作区、主题、对话与状态标记](assets/promo/hero.png)
 
@@ -31,7 +31,7 @@ dsh plugin --profile web add dsh-conversation-tree
 DSH 里打开 **插件 → 发现（Discover）→ 索引源（Index sources）**，添加：
 
 ```
-https://cdn.jsdelivr.net/gh/chriswang/dsh-plugins-index@main/index.json
+https://cdn.jsdelivr.net/gh/orchivo/dsh-plugins-index@main/index.json
 ```
 
 索引走 jsDelivr CDN；加进「发现」后即可在插件列表里直接安装。
@@ -44,7 +44,7 @@ https://cdn.jsdelivr.net/gh/chriswang/dsh-plugins-index@main/index.json
 帮我安装 DSH 插件 dsh-conversation-tree：
 1. 执行 `dsh plugin --profile web add dsh-conversation-tree`。
 2. 如果找不到，在「插件 → 发现 → 索引源」里添加
-   https://cdn.jsdelivr.net/gh/chriswang/dsh-plugins-index@main/index.json
+   https://cdn.jsdelivr.net/gh/orchivo/dsh-plugins-index@main/index.json
    再从插件列表安装。
 3. 装完提醒我重启 DSH。
 ```
@@ -83,7 +83,7 @@ https://cdn.jsdelivr.net/gh/chriswang/dsh-plugins-index@main/index.json
 | 是否改 DSH UI | 只在旁边加一条树栏，产品 UI 不动 | 另一套回复数据模型 |
 | 模型工具 | 9 个，读写这棵对话树 | — |
 
-在 **dsh.so** 上规范 slug `/artifact/dsh-conversation-tree/` 归 Unintendedz，所以请认 **`@chriswang/dsh-conversation-tree`**——我们的是 [`/artifact/dsh-conversation-tree-2/`](https://www.dsh.so/zh/artifact/dsh-conversation-tree-2/)。
+在 **dsh.so** 上规范 slug `/artifact/dsh-conversation-tree/` 归 Unintendedz（另一个插件）——我们的是 [`/artifact/dsh-conversation-tree-2/`](https://www.dsh.so/zh/artifact/dsh-conversation-tree-2/)。
 
 ## 安全与隐私
 
@@ -146,7 +146,7 @@ dsh plugin --profile web remove dsh-conversation-tree
 
 **它会碰我的文件或执行命令吗？** 不会。工具只读写对话树文档，没有 shell 和文件系统访问。
 
-**源码在哪？** <https://github.com/chriswang/dsh-conversation-tree>。npm 上是预构建产物；从源码构建需要 DSH 源码 checkout，因为本项目刻意不带 npm 依赖（打包器和类型声明都借用那份 checkout）。
+**源码在哪？** <https://github.com/orchivo/dsh-conversation-tree>。npm 上是预构建产物；从源码构建需要 DSH 源码 checkout，因为本项目刻意不带 npm 依赖（打包器和类型声明都借用那份 checkout）。
 
 ## 许可证
 

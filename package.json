@@ -5,11 +5,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/chriswang/dsh-conversation-tree.git"
+    "url": "git+https://github.com/orchivo/dsh-conversation-tree.git"
   },
-  "homepage": "https://github.com/chriswang/dsh-conversation-tree#readme",
+  "homepage": "https://github.com/orchivo/dsh-conversation-tree#readme",
   "bugs": {
-    "url": "https://github.com/chriswang/dsh-conversation-tree/issues"
+    "url": "https://github.com/orchivo/dsh-conversation-tree/issues"
   },
   "type": "module",
   "main": "lib/index.js",
