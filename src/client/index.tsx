@@ -41,7 +41,10 @@ import { openBandCollapseMemory, openFirstRunHint, type BandCollapseStore } from
 import { loadView } from '../shared/view-state.js'
 import { MapEntryBridge, MapLauncher, MapPanelIcon } from './Entries.js'
 import { NS, zh, en } from './locales/index.js'
+import { HomeNotice } from './HomeNotice.js'
+import { createComposerFocusTracker } from './composer-focus.js'
 import { MapPanel } from './MapPanel.js'
+import { createMapViewBridge } from './view-bridge.js'
 import type {
   ClientContext, CurrentSessionLike, MapServices, PickDirectory, UiSessionLike,
   UiWorkspaceLike, WorkspacesService,
@@ -225,6 +228,16 @@ export function apply(ctx: ClientContext): void {
   // migration, optimistic commits, polling, and the localStorage-only fallback.
   const store = createMapStore({ ctx, storage })
   ctx.effect(() => () => { store.dispose() }, 'conversation-map: Host map store')
+  // The band's view state, lent to the composer-side notice. The panel stays
+  // the only writer (it publishes and binds actions); the entry registered into
+  // the shipped Conversation's input dock reads it. See `view-bridge.ts`.
+  const viewBridge = createMapViewBridge(storage)
+  // The divergence notice is gated on the shipped composer actually holding
+  // focus: browsing the tree must not raise it, putting the caret back into the
+  // input must. The tracker reads the product's own composer region; see
+  // `composer-focus.ts`.
+  const composerFocus = createComposerFocusTracker()
+  ctx.effect(() => () => { composerFocus.dispose() }, 'conversation-map: composer focus tracker')
   // In-memory observation of the application's Session status: the only extra
   // facts are transition times (for the two-minute halo) and forwarded error
   // events (the product has no failed state). Nothing is persisted, so a reload
@@ -404,6 +417,7 @@ export function apply(ctx: ClientContext): void {
     openSession: resolveOpenSession(ctx),
     externalCurrent: resolveExternalCurrent(ctx),
     collapse: () => { collapsed.set(true) },
+    viewBridge,
   }
 
   /** The shell's current Session id, or null when the binding is unreadable. */
@@ -608,6 +622,20 @@ export function apply(ctx: ClientContext): void {
       activate: activateEntry,
     }),
   }, MapPanelIcon)), 'conversation-map: sidebar panel row')
+
+  // The composer-side notice: one additive entry in the shipped Conversation's
+  // own public seat above the input card (`conversation.input.dock`, a list of
+  // full-width entries; Todo/Goal/Queue and an external plugin's Band use the
+  // same one). It is not a replacement of any product UI: the entry renders
+  // nothing unless the band is on screen, the slot's Session is the one the map
+  // has open, and the selection has left that Session's home row. The band
+  // publishes the view and the two actions through `viewBridge`.
+  ctx.effect(() => ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
+    name: 'conversation.input.dock',
+    id: 'conversation-map-home',
+    order: 30,
+    inject: () => ({ services, bridge: viewBridge, collapsed, focus: composerFocus, locale: ctx.locale }),
+  }, HomeNotice)), 'conversation-map: session home notice')
 
   // The map band exists only while the band is expanded. It is a frame-wide
   // overlay entry (the additive root-scoped seat), so mounting and disposing it

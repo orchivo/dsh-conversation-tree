@@ -139,7 +139,11 @@ test('the space switcher leads the band second row, on the node list rail', () =
   const row2 = declarations('.cm-band-row2')
   assert.notEqual(row2, null, 'the second row is named for what it is, not for the search box it once held')
   assert.match(row2, /align-items:flex-start/, `28px row, 24px contents, top-aligned: the 4px above the seam is what stops the tab reading: ${row2}`)
-  assert.match(row2, /padding-left:calc\(var\(--cm-band-rail,14px\) - 8px\)/, `no window-chrome clearance on this row: ${row2}`)
+  assert.match(
+    row2,
+    /padding-left:calc\(var\(--cm-band-rail,14px\) - 8px \+ var\(--cm-band-window-gutter,0px\)\)/,
+    `no window-chrome clearance on this row; the window-edge gutter rides on the same rail as the first column: ${row2}`,
+  )
   assert.match(row2, /overflow:clip/, `clip rather than hidden: a scroll container slides its content when a child takes focus: ${row2}`)
   assert.match(
     declarations('.cm-band-row2>.cm-band-search'),
@@ -166,6 +170,139 @@ test('the space switcher leads the band second row, on the node list rail', () =
   )
   assert.match(declarations('.cm-col-scroll'), /padding:0 6px/)
   assert.match(declarations('.cm-node-row'), /padding:0 8px/)
+})
+
+/**
+ * The window-edge gutter: the first column pays the sidebar's window padding.
+ *
+ * Map mode collapses the shell's left column, so on the desktop the band's left
+ * edge becomes the frame's left edge — the seat the sidebar used to occupy.
+ * The band's own in-column inset is 6px (a seam-relative pill inset), while the
+ * shipped sidebar spends 12px of window padding (`--dsh-sidebar-inline-padding`)
+ * before the same 8px row inset. The 6px the first column pays while flush
+ * completes that 12px, which is why the numbers below are `+ var(...)` over the
+ * base rules and not a second, private rhythm.
+ *
+ * Pinned because the whole fix is arithmetic spread over four rules that live
+ * far apart, and because the failure mode is silent: a rule that forgot the
+ * `:first-child` scope would indent every column, one that forgot the variable
+ * default would move the layout outside the collapsed state, and a margin
+ * instead of padding would inset the band's fill and start narrowing columns.
+ */
+test('the first column pays the sidebar window padding only at the frame edge', () => {
+  // One named number, defaulting to "not at the edge": every other state keeps
+  // the shipped geometry and the variable is the only switch.
+  assert.ok(
+    allDeclarations('.cm-band').some(block => block.includes('--cm-band-window-gutter:0px')),
+    'the gutter is a named variable with a 0 default, not a 6px baked into four rules',
+  )
+
+  // The three surfaces that carry the column's left edge: header, list, footer.
+  const head = declarations('.cm-band .cm-node-col:first-child .cm-col-head')
+  assert.match(
+    head,
+    /padding-left:calc\(8px \+ var\(--cm-band-window-gutter,0px\)\)/,
+    `the first column's header title moves with the list below it: ${head}`,
+  )
+  const scroll = declarations('.cm-band .cm-node-col:first-child .cm-col-scroll')
+  assert.match(
+    scroll,
+    /padding-left:calc\(6px \+ var\(--cm-band-window-gutter,0px\)\)/,
+    `the list keeps its 6px pill inset and adds the window padding: ${scroll}`,
+  )
+  const footer = declarations('.cm-band .cm-node-col:first-child .cm-col-footer')
+  assert.match(
+    footer,
+    /padding-left:calc\(6px \+ var\(--cm-band-window-gutter,0px\)\)/,
+    `the pinned archive row stays on the same rail: ${footer}`,
+  )
+
+  // Only the first column: its left edge is the window; every later column's is
+  // a seam, and its base rules must keep the 6px in-column rail. The base
+  // selectors are read through allDeclarations because the gutter rule's own
+  // selector ends in the same class name.
+  assert.equal(declarations('.cm-node-col .cm-col-scroll'), null, 'a gutter rule without :first-child would indent every column')
+  assert.ok(allDeclarations('.cm-col-head').some(block => block.includes('padding:0 8px')))
+  assert.ok(allDeclarations('.cm-col-scroll').some(block => block.includes('padding:0 6px 12px')))
+  assert.ok(allDeclarations('.cm-col-footer').some(block => block.includes('padding:0 6px 8px')))
+
+  // Padding, not a margin and not a width: the column's outer width stays the
+  // reader's number and the fill still reaches the frame edge.
+  assert.match(declarations('.cm-node-col'), /flex:0 0 auto/, 'the column keeps its fixed outer width')
+  assert.equal(/\.cm-node-col:first-child\{[^}]*margin-left/.test(bundle), false, 'a margin would inset the fill; the gutter is padding inside the first column')
+
+  // The second row moves by the same variable, keeping the switcher on the rail.
+  assert.match(
+    declarations('.cm-band-row2'),
+    /var\(--cm-band-window-gutter,0px\)/,
+    'the row above the list must step aside with it, or the switcher drifts off the rail',
+  )
+})
+
+/**
+ * A scrolled-away column start is a scroll cut, not a list edge.
+ *
+ * The window-edge gutter above is the *resting* blank: it belongs to the first
+ * column's content and scrolls out of view with that column, so the moment the
+ * strip is displaced the window edge cuts whatever column happens to be there.
+ * The shell's own overflow language for a cut horizontal strip is a masked fade,
+ * not a private padding (ui-dockkit fades its chip strip 24px per hidden side;
+ * ui-workspace fades clipped row titles 12px). Three things can silently
+ * regress, so all three are pinned: the reading (`data-scrolled`, written by the
+ * panel), the fade's width and side (24px, start only), and the fill behind it —
+ * a mask also fades the masked element's own background, so the gray has to be
+ * painted by the frame, still ending at the seam's half-hairline reservation.
+ */
+test('a scrolled-away column start fades instead of gaining a private padding', () => {
+  // The fill moved to the strip's frame, and only the seam reservation moved
+  // with it: the strip itself must keep neither a margin nor a background, or
+  // the mask would open onto the Conversation's white at the window edge.
+  const area = declarations('.cm-node-area')
+  assert.notEqual(area, null, 'the strip rule is missing')
+  assert.equal(/margin-right/.test(area), false, `the seam reservation belongs to the frame; a margin here would leave the fade unpainted: ${area}`)
+  assert.equal(/background:/.test(area), false, `the fill belongs to the frame; a masked background would reveal the Conversation: ${area}`)
+
+  const frame = declarations('.cm-band-main')
+  assert.notEqual(frame, null, 'the strip frame rule is missing')
+  assert.match(
+    frame,
+    /margin-right:calc\(var\(--cm-band-gutter-width,8px\) \/ 2 \+ \.5px\)/,
+    `the frame keeps the seam's half-handle-plus-half-hairline reservation: ${frame}`,
+  )
+  assert.match(
+    frame,
+    /background:var\(--dsw-specific-sidebar-fill,color-mix\(in srgb,currentColor 3%,transparent\)\)/,
+    `the frame paints the band's gray, so the fade ends on fill rather than on white: ${frame}`,
+  )
+
+  // One reading, one side, and the shell's horizontal-strip width — not the
+  // 12px the shell uses for a clipped text run.
+  const fade = declarations('.cm-node-area[data-scrolled="true"]')
+  assert.match(
+    fade,
+    /mask-image:linear-gradient\(to right,transparent 0,#000 24px\)/,
+    `the start side fades over 24px while columns are out of view: ${fade}`,
+  )
+  assert.equal(
+    /mask-image:linear-gradient\(to left/.test(bundle),
+    false,
+    'the end side is not faded: its cut lands on the band\'s seam, where the hairline already states the boundary',
+  )
+
+  // A drag's edges are aiming surfaces: the fade must not soften the insertion
+  // line or the auto-scroll bands while a row is in flight.
+  const drag = declarations('.cm-node-area[data-scrolled="true"][data-drag="true"]')
+  assert.match(drag, /mask-image:none/, `the fade yields to a drag: ${drag}`)
+
+  // The fade is the strip's alone: a mask elsewhere would fade content it was
+  // never measured for. Selectors are single-line in this sheet, and comments
+  // are multi-line, so the selector capture cannot swallow a comment above.
+  const masked = [...bundle.matchAll(/([^\n{}]+)\{([^}]*mask-image:[^}]*)\}/g)].map(match => match[1])
+  assert.deepEqual(
+    masked,
+    ['.cm-node-area[data-scrolled="true"]', '.cm-node-area[data-scrolled="true"][data-drag="true"]'],
+    `the strip is the only masked surface in the sheet: ${masked.join(' | ')}`,
+  )
 })
 
 /**
@@ -293,33 +430,53 @@ test('the band draws its two seat controls as 28x28 icon boxes', () => {
 })
 
 /**
- * Hysteresis has to look provisional, not committed.
+ * The drop target is a group, and hysteresis has to look provisional.
  *
- * While the pointer is off every row the candidate is kept (`data-drop="held"`)
- * instead of vanishing, so the reader can see what releasing would still do. It
- * is drawn dashed — the same mark the sheet uses for "not settled yet" — and the
- * insertion line it carries fades, because the line is exactly what the held
- * state has *not* decided. Both marks are scoped to the plugin's two row classes,
- * so no other surface that happens to carry `data-drop` inherits them.
+ * A group is the header row plus every conversation it owns, so the mark and
+ * the boundary line belong to the wrapper, not to a row. While the pointer is
+ * off every group the candidate is kept (`data-drop-group="held"`) and its line
+ * fades, because the line is exactly what the held state has *not* decided.
+ * Hover and row tools also go quiet under the gesture: a second hover fill below
+ * the group card would read as a second target.
  */
-test('a held drop candidate stays marked, dashed, and dims its insertion line', () => {
-  const held = declarations('.cm-thread-row[data-drop="held"]')
-  assert.notEqual(held, null, 'the held state is missing from the shipped sheet')
-  assert.match(held, /outline:1px dashed var\(--dsw-alias-border-l2/, `held reads as provisional: ${held}`)
-  assert.match(held, /outline-offset:-1px/, `the dashed frame sits inside the row's own box: ${held}`)
-  assert.ok(
-    bundle.includes('.cm-node-row[data-drop="held"],.cm-thread-row[data-drop="held"]{'),
-    'both row kinds wear the same held mark, in one rule',
+test('the group sheet owns the drop mark, the insertion line and hover silence', () => {
+  assert.notEqual(
+    declarations('.cm-node-group'),
+    null,
+    'the shipped sheet needs the group wrapper rule (position + radius)',
+  )
+  assert.match(bundle, /\.cm-node-group\{position:relative;border-radius:12px\}/, 'the wrapper is the positioned card')
+
+  const line = declarations('.cm-node-group>[data-insert]')
+  assert.notEqual(line, null, 'the group-boundary line needs its own stacking rule')
+  assert.match(line, /z-index:4/, `the line stays above the rows it crosses: ${line}`)
+
+  const held = declarations('.cm-node-group[data-drop-group="held"]>[data-insert]')
+  assert.notEqual(held, null, 'a held group fades the line it was promising')
+  assert.match(held, /opacity:\.55/, `the held state has not decided where the line goes: ${held}`)
+
+  assert.match(
+    bundle,
+    /\.cm-node-area\[data-drag="true"\] \.cm-node-row:hover:not\(\[data-selected="true"\]\)[^{]*\{[^}]*background:transparent/,
+    'row hover must not paint a competing fill under the group mark',
+  )
+  assert.match(
+    bundle,
+    /\.cm-node-area\[data-drag="true"\] \.cm-row-actions\{[^}]*display:none/,
+    'row tools step aside while a drag is in flight',
+  )
+  assert.match(
+    bundle,
+    /\.cm-node-group\[data-drop-group="invalid"\][^{]*\{[^}]*cursor:no-drop/,
+    'a refused group says no through the cursor',
   )
 
-  const line = declarations('.cm-thread-row[data-drop="held"] [data-insert]')
-  assert.notEqual(line, null, 'the insertion line must fade with the row it belongs to')
-  assert.match(line, /opacity:\.55/, `a held row has not decided where the line goes: ${line}`)
-
+  assert.equal(bundle.includes('.cm-thread-row[data-drop='), false, 'the retired row-level drop rules are gone')
+  assert.equal(bundle.includes('.cm-node-row[data-drop='), false, 'and no row inherits a stray target mark')
   assert.equal(
-    /(^|[^\w\]-])\[data-drop="held"\]\{/m.test(bundle),
+    /(^|[^\w\]-])\[data-drop-group\]\{/m.test(bundle),
     false,
-    'a bare [data-drop] rule would mark rows the plugin does not own',
+    'a bare [data-drop-group] rule would mark groups the plugin does not own',
   )
 })
 
@@ -539,32 +696,59 @@ test('the tree keyboard cursor is visible and reads apart from the selection', (
 })
 
 /**
- * The selected row's lineage wears the same quieter mark as the row itself.
+ * The clicked node is an outlined container, unless it is on the home chain.
  *
- * When the selection is deep, the columns above it are open *because* it lives
- * under them, and the reader has to be able to see which upper level's domain
- * they are adding into. So the Workspace row and every ancestor topic carry the
- * selected node's own secondary mark — not a third, invented tint that would
- * read as another state — and hover leaves those rows alone, exactly as it
- * leaves the selected row alone.
+ * The selection is the temporary navigation cursor: one 1.5px inset outline in
+ * brand ink (62%) plus the bold title and no surface. The owner's rule makes one
+ * exception: a row that is both selected and on the open conversation's home
+ * chain shows the chain style (filled folder + bold), because the chain is the
+ * always-on statement and the open conversation row already says what is being
+ * read. The sheet expresses that by excluding chain rows from the outline rule.
  */
-test('the selected lineage wears the selected node mark, and hover leaves it alone', () => {
-  // Both states share one rule, so the assertion reads the rule body from the
-  // shipped sheet rather than a single selector: the two marks must not drift
-  // into two tints, which would read as a third, invented selection state.
-  const sharedSelector = '.cm-node-row[data-selected="true"],.cm-node-row[data-path-selected="true"]{'
-  const sharedStart = bundle.indexOf(sharedSelector)
-  assert.ok(sharedStart >= 0, 'the path rows must share the selected node rule instead of inventing a second tint')
-  const shared = bundle.slice(sharedStart, bundle.indexOf('}', sharedStart))
-  assert.match(shared, /background:color-mix\(in srgb,var\(--dsw-alias-brand-primary/, `the lineage is tinted: ${shared}`)
-  assert.match(shared, /color:var\(--dsw-alias-brand-primary/, `and stated in brand ink: ${shared}`)
-  assert.match(shared, /font-weight:500/, `and carries the selected weight: ${shared}`)
+test('the clicked node is an outlined container unless it is on the home chain', () => {
+  const selector = '.cm-node-row[data-selected="true"]:not([data-session-path="true"])'
+  const selected = declarations(selector)
+  assert.notEqual(selected, null, 'the selected node rule is missing from the shipped sheet')
+  assert.match(selected, /background:transparent/, `the selection paints no surface: ${selected}`)
+  assert.doesNotMatch(selected, /background:color-mix/, `the selection must not keep a fill: ${selected}`)
+  assert.match(
+    selected,
+    /box-shadow:inset 0 0 0 1\.5px color-mix\(in srgb,var\(--dsw-alias-brand-primary,currentColor\) 62%,transparent\)/,
+    `the selection is a 1.5px brand outline: ${selected}`,
+  )
+  assert.match(selected, /font-weight:600/, `the selected row carries the bold title: ${selected}`)
+  assert.doesNotMatch(selected, /outline:/, `the selection must not borrow the outline channel (search cursor): ${selected}`)
+  // The chain wins when a row is both: no second selected rule may paint the
+  // chain rows, or the priority rule silently dies.
+  const bare = declarations('.cm-node-row[data-selected="true"]')
+  assert.equal(bare, null, 'the selection outline must always be scoped away from the home chain')
+})
 
-  const hoverSelector = '.cm-node-row:hover:not([data-selected="true"]):not([data-path-selected="true"])'
+/**
+ * The selection's ancestors are plain rows again.
+ *
+ * The owner's marker language reserves two marks: the always-on home chain
+ * (filled folder + bold) and the clicked row (inset border). A container above
+ * the click is neither, so it does not keep the old soft path outline — it
+ * hovers and behaves like any other row. Keeping a third faint mark here was
+ * tried and read as a second chain; the tree is calmer without it.
+ */
+test('the selection ancestors stay plain while the chain owns the marks', () => {
+  assert.equal(declarations('.cm-node-row[data-path-selected="true"]'), null, 'the selection path rule left the sheet')
+  assert.equal(declarations('.cm-node-row[data-path-selected="true"] .cm-slot'), null, 'the selection path no longer recolours the icon')
+
+  const hoverSelector = '.cm-node-row:hover:not([data-selected="true"]):not([data-session-path="true"])'
   const hoverStart = bundle.indexOf(hoverSelector)
-  assert.ok(hoverStart >= 0, 'hover must still be scoped to rows that are neither selected nor on the path')
+  assert.ok(hoverStart >= 0, 'hover is scoped to rows that are neither selected nor on the home chain')
   const hover = bundle.slice(hoverStart, bundle.indexOf('}', hoverStart))
   assert.match(hover, /background:var\(--dsw-alias-interactive-bg-hover/, `the hover fill is the interactive token: ${hover}`)
+  assert.doesNotMatch(hover, /data-path-selected/, 'a selection ancestor is a normal row and takes hover')
+
+  // Blind-spot guard: the attribute still exists in the DOM contract, but no
+  // CSS selector may key off it — the sheet has exactly two row marks (the home
+  // chain and the clicked row), and a stray `[data-path-selected]` rule would
+  // quietly repaint a selection ancestor again.
+  assert.equal(bundle.includes('[data-path-selected'), false, 'no CSS selector may key off the selection path')
 })
 
 /**
@@ -653,16 +837,41 @@ test('the sidebar status cluster is anchored to the row, not to the glyph cell',
 /**
  * The space entry's status cluster is the active space's count, compared by the
  * reader against the sidebar row's whole-map count. It must not squeeze the
- * chrome controls in the two states where row space is scarce.
+ * chrome controls in the one state where row space is scarce: a search field
+ * sharing its row.
+ *
+ * The header used to have a second such state — the blank Session, where the
+ * whole chrome collapsed to one row and the entry became a narrow first-row
+ * pill — and that variant is gone: the band's top bar keeps its two rows in
+ * every state, so the entry always sits on row two with its normal width and the
+ * compact override must not come back.
  */
-test('the space entry gives its cluster up in the compact and search states', () => {
-  const compact = declarations('.cm-band[data-compact] .cm-space-btn .cm-rollup')
-  assert.notEqual(compact, null, 'the compact header hides the counts instead of squeezing the controls')
-  assert.match(compact, /display:none/, `the compact rule removes the cluster: ${compact}`)
+test('the space entry gives its cluster up when the search field shares its row', () => {
+  assert.equal(
+    declarations('.cm-band[data-compact] .cm-space-btn .cm-rollup'), null,
+    'the one-row blank-Session header variant is gone; no compact cluster rule',
+  )
+  assert.equal(
+    declarations('.cm-band[data-compact="true"] .cm-band-topbar'), null,
+    'the top bar keeps its rule on a blank Session instead of dropping it',
+  )
 
   const searching = declarations('.cm-band-row2:has(.cm-search) .cm-crumb .cm-rollup')
   assert.notEqual(searching, null, 'opening the search field on row two hides the counts too')
   assert.match(searching, /display:none/, `the search rule removes the cluster: ${searching}`)
+})
+
+/**
+ * The band top bar keeps the shipped header's rule and its own two rows even
+ * while the shipped header is the blank 40px one: the panel computes the height
+ * from the measured leading row (see `bandHeaderHeight` in the render tests) and
+ * the sheet only has to keep the rule, which now stands alone on the blank
+ * landing page instead of disappearing with the shipped header's.
+ */
+test('the band top bar always draws its baseline rule', () => {
+  const topbar = declarations('.cm-band-topbar')
+  assert.notEqual(topbar, null, 'the top bar has its own box')
+  assert.match(topbar, /border-bottom:\.5px solid/, `the rule is unconditional: ${topbar}`)
 })
 
 /**
@@ -718,7 +927,16 @@ test('search result rows reserve a second line and keep the cursor separate from
   const active = declarations('.cm-node-row[data-search-active="true"],.cm-thread-row[data-search-active="true"]')
   assert.notEqual(active, null, 'the keyboard cursor needs its own mark')
   assert.match(active, /outline:/, `the cursor is a ring, not the selected background: ${active}`)
+  assert.doesNotMatch(active, /background:/, `the cursor never adds a surface to the row it walks: ${active}`)
   assert.ok(!/font-weight:500/.test(active), 'the cursor never claims the selected row weight')
+
+  const wash = declarations('.cm-node-row[data-search-active="true"]:not([data-selected="true"]),.cm-thread-row[data-search-active="true"]:not([data-selected="true"])')
+  assert.notEqual(wash, null, 'the cursor wash is scoped away from rows that already carry a fill')
+  assert.match(
+    wash,
+    /background:color-mix\(in srgb,var\(--dsw-alias-brand-primary,currentColor\) 9%,transparent\)/,
+    `the wash stays one step quieter than the selected row: ${wash}`,
+  )
 
   const mark = declarations('.cm-search-mark')
   assert.notEqual(mark, null, 'a matched run must be visible inside a snippet')
@@ -740,4 +958,238 @@ test('a row that cannot be selected does not borrow the button affordance', () =
     /\.cm-node-row:hover[^{]*:not\(\[data-selectable="false"\]\)[^{]*\{/,
     'the hover wash must skip rows that have no action',
   )
+})
+
+/**
+ * Dialog body copy and the seat's one-time discovery pill once shared a class
+ * name. The pill's absolute placement then applied to every `.cm-hint` inside a
+ * dialog, so confirmation sentences left the card and floated beside it — the
+ * reader saw an empty dialog and three stray pills. Pin the two rules apart:
+ * exactly one in-flow rule for dialog hints, and the pill anchored in its own.
+ */
+test('dialog hint copy stays in the card, the discovery pill is the anchored one', () => {
+  const hints = allDeclarations('.cm-hint')
+  assert.equal(hints.length, 1, 'a second `.cm-hint` rule would override the dialog copy again')
+  assert.ok(!/position:\s*absolute/.test(hints[0]), `dialog copy must stay in flow: ${hints[0]}`)
+  assert.ok(!/(^|;)left:/.test(hints[0]), 'dialog copy must not be pinned beside an anchor')
+
+  const pill = declarations('.cm-seat-hint')
+  assert.notEqual(pill, null, 'the one-time discovery pill owns its own class')
+  assert.match(pill, /position:\s*absolute/, 'the pill is the anchored element')
+  assert.match(pill, /white-space:nowrap/, 'the pill stays one line')
+})
+
+/**
+ * A′ removed the band's row-2 reading chip. The chip's seat, its ghost-button
+ * geometry and its density variants must leave the sheet with it — a leftover
+ * rule would paint a row the panel no longer renders — while the row itself
+ * stays the space-breadcrumb / search row it was before the chip.
+ */
+test('the band second row no longer styles a reading chip', () => {
+  assert.notEqual(declarations('.cm-band-row2'), null, 'the second row keeps its own rule')
+  assert.equal(declarations('.cm-band-row2>.cm-home-slot'), null, 'the chip seat rule is gone')
+  assert.equal(declarations('.cm-home-chip'), null, 'the chip button rule is gone')
+  assert.equal(declarations('.cm-home-chip-label'), null, 'the chip label rule is gone')
+  assert.equal(declarations('.cm-home-chip[data-tier="icon"] .cm-home-chip-label'), null, 'the density rules are gone')
+})
+
+/** The old divergence card was replaced by the read-only line; its rules must not survive. */
+test('the retired divergence card has no rules left', () => {
+  for (const selector of [
+    '.cm-home-notice',
+    '.cm-home-notice-card',
+    '.cm-home-notice-icon',
+    '.cm-home-notice-desc',
+    '.cm-home-notice-actions',
+    '.cm-home-notice-btn',
+    '.cm-home-notice-dismiss',
+  ]) {
+    assert.equal(declarations(selector), null, `${selector} must leave the sheet with the card`)
+  }
+})
+
+/**
+ * The composer-side context bar is the loudest reading aid A′ ships: a 30px
+ * pill on the composer's own width axis — layer-2 surface, 8px radius, 10px
+ * side padding — so the chain reads as a breadcrumb instead of a whisper. It
+ * borrows the composer's width variables so it lines up with the input card, and
+ * keeps no shadow or frame of its own: the surface is the whole chrome.
+ */
+test('the context bar is one 30px breadcrumb on the composer width axis', () => {
+  const line = declarations('.cm-home-path')
+  assert.notEqual(line, null, 'the read-only context bar has its own rule')
+  assert.match(line, /display:flex/, `the badge and the chain share one row: ${line}`)
+  assert.match(line, /align-items:center/, `the row is vertically centred: ${line}`)
+  assert.match(line, /height:30px/, `A′ fixed the bar at 30px: ${line}`)
+  assert.match(line, /border-radius:8px/, `the bar is a soft pill: ${line}`)
+  assert.match(line, /padding:0 10px/, `the bar gives its ends 10px of air: ${line}`)
+  assert.match(line, /gap:8px/, `the badge and the chain share an 8px rhythm: ${line}`)
+  assert.match(line, /font-size:12\.5px/, `the chain reads one step above caption size: ${line}`)
+  assert.match(line, /min-width:0/, `a long chain may shrink: ${line}`)
+  assert.match(line, /margin:0 auto/, `the bar centres on the composer card: ${line}`)
+  assert.match(line, /overflow:hidden/, `the bar clips its chain instead of growing: ${line}`)
+  assert.match(line, /white-space:nowrap/, `the chain stays on one line: ${line}`)
+  assert.match(
+    line,
+    /width:calc\(100% - 2\*var\(--dsh-composer-side-clearance\) - 4\*var\(--dsh-composer-dock-inset\)\)/,
+    `the column comes from the composer's own variables: ${line}`,
+  )
+  assert.match(
+    line,
+    /max-width:calc\(var\(--dsh-composer-card-max-width\) - 4\*var\(--dsh-composer-dock-inset\)\)/,
+    `the cap is the input card's width: ${line}`,
+  )
+  assert.match(
+    line,
+    /background:color-mix\(in srgb,var\(--dsw-alias-brand-primary,currentColor\) 5%,transparent\)/,
+    `the surface is a quiet brand wash, visible on a white chat column: ${line}`,
+  )
+  assert.doesNotMatch(line, /(^|;)box-shadow:/, `the bar carries no lift: ${line}`)
+  assert.doesNotMatch(line, /(^|;)border:/, `the bar has no frame: ${line}`)
+})
+
+/**
+ * The bar's parts: the 「当前会话」 badge stays quiet and fixed, the segment boxes
+ * shrink and ellipsize, and only the last segment — the open conversation's own
+ * title — takes the primary ink and the heavier weight, so the chain reads from
+ * the space down to the conversation being typed into. The title sits in its own
+ * part with a width floor: the chain group clips its tail, and the one hop the
+ * reader is about to type into must not be squeezed out by a long chain. When no
+ * title is known the home node keeps the emphasised end it always had. No icon
+ * rule survives: the badge is the only mark the line opens with.
+ */
+test('the context bar parts: badge, chain, and the emphasised conversation title', () => {
+  assert.equal(declarations('.cm-home-path-glyph'), null, 'the bubble mark left the sheet with the icon')
+
+  const badge = declarations('.cm-home-path-label')
+  assert.notEqual(badge, null, '「当前会话」 is its own badge')
+  assert.match(badge, /height:20px/, `the badge is a 20px chip inside the 30px bar: ${badge}`)
+  assert.match(badge, /padding:0 8px/, `the badge pads its label: ${badge}`)
+  assert.match(badge, /border-radius:6px/, `the badge is softly rounded: ${badge}`)
+  assert.match(
+    badge,
+    /background:color-mix\(in srgb,var\(--dsw-alias-brand-primary,currentColor\) 10%,transparent\)/,
+    `the badge is a brand tint one step stronger than the bar: ${badge}`,
+  )
+  assert.match(badge, /color:var\(--dsw-alias-brand-primary/, `the badge text is brand ink: ${badge}`)
+  assert.match(badge, /font-size:11px/, `the badge is one size below the chain: ${badge}`)
+  assert.match(badge, /font-weight:500/, `the badge is medium, not bold: ${badge}`)
+
+  const segments = declarations('.cm-home-path-segments')
+  assert.notEqual(segments, null, 'the chain is its own inline box')
+  assert.match(segments, /min-width:0/, `the chain may shrink: ${segments}`)
+  assert.match(segments, /overflow:hidden/, `the chain clips at the bar edge: ${segments}`)
+
+  const part = declarations('.cm-home-path-part')
+  assert.notEqual(part, null, 'each chain level is a part')
+  assert.match(part, /min-width:0/, `a part may shrink: ${part}`)
+
+  const seg = declarations('.cm-home-path-seg')
+  assert.notEqual(seg, null, 'each chain segment owns its ellipsis')
+  assert.match(seg, /max-width:220px/, `one very long name cannot eat the whole bar: ${seg}`)
+  assert.match(seg, /overflow:hidden/, `an over-long name is clipped: ${seg}`)
+  assert.match(seg, /text-overflow:ellipsis/, `the clip reads as an ellipsis: ${seg}`)
+  assert.match(seg, /white-space:nowrap/, `the ellipsis needs a single line: ${seg}`)
+
+  const last = declarations('.cm-home-path-seg[data-last="true"]')
+  assert.notEqual(last, null, 'the final segment is marked')
+  assert.match(
+    last,
+    /color:var\(--dsw-alias-label-primary/,
+    `the chain end — the conversation's title, or the home node when it has none — is the primary reading: ${last}`,
+  )
+  assert.match(last, /font-weight:600/, `the chain end is emphasised harder than the badge: ${last}`)
+
+  // The title is the chain's last hop and sits outside the clipping segment
+  // group, so it keeps a width floor of its own: a long chain ellipsizes instead
+  // of eating the name of the conversation the reader is typing into.
+  const thread = declarations('.cm-home-path-thread')
+  assert.notEqual(thread, null, 'the conversation title sits in a part of its own')
+  assert.match(thread, /min-width:84px/, `a width floor keeps a long chain from squeezing the title out: ${thread}`)
+  assert.match(thread, /max-width:280px/, `one very long title cannot eat the whole bar either: ${thread}`)
+  assert.match(thread, /overflow:hidden/, `the title part clips at its cap: ${thread}`)
+
+  const threadSeg = declarations('.cm-home-path-thread-seg')
+  assert.notEqual(threadSeg, null, 'the title segment owns its own ellipsis cap')
+  assert.match(threadSeg, /max-width:260px/, `the title ellipsizes before its part's cap: ${threadSeg}`)
+
+  const separator = declarations('.cm-home-path-sep')
+  assert.notEqual(separator, null, 'the separators have their own box')
+  assert.match(separator, /flex:none/, `separators never shrink: ${separator}`)
+  assert.match(separator, /padding:0 5px/, `separators carry their own air: ${separator}`)
+  assert.match(separator, /opacity:\.7/, `the separators stay quieter than the names: ${separator}`)
+
+  const threadSeparator = declarations('.cm-home-path-thread .cm-home-path-sep')
+  assert.notEqual(threadSeparator, null, 'the title hop has its own separator rhythm')
+  assert.match(
+    threadSeparator,
+    /padding:0 5px 0 2px/,
+    `the bar's own 8px gap already supplies the left air: ${threadSeparator}`,
+  )
+
+  // The old 「正在读」 prefix rule must not survive the rename.
+  assert.equal(declarations('.cm-home-path-prefix'), null, 'the prefix rule left the sheet with the wording')
+})
+
+/**
+ * The home chain is stated with the filled folder and the bold title — never
+ * with a second surface, an outline, or a ring.
+ *
+ * The home node and every container above it (Workspace row + ancestor topics)
+ * carry `data-session-path`; the chain is always on, so after clicking another
+ * node the reader can still see which branch the open conversation lives under,
+ * even when the home's own column is not rendered. The home row has no bespoke
+ * rule any more: it is simply one row of that chain, and the thread rows nested
+ * under it show that it owns the conversation. The 5px gutter ring, the 10% lane
+ * and the 40% path outline are all gone — each was a second way to say the same
+ * thing, or (the ring) a point that collided with the folder slot.
+ */
+test('the home chain is the filled folder + bold title, with no surface or ring', () => {
+  assert.equal(declarations('.cm-node-row[data-session-home="true"]'), null, 'the home row has no bespoke rule')
+  assert.equal(declarations('.cm-node-row[data-session-home="true"]::after'), null, 'the 5px ring left the sheet')
+
+  const chain = declarations('.cm-node-row[data-session-path="true"]')
+  assert.notEqual(chain, null, 'the home chain rule is missing from the shipped sheet')
+  assert.match(chain, /background:transparent/, `the chain paints no surface: ${chain}`)
+  assert.doesNotMatch(chain, /box-shadow/, `the chain carries no outline: ${chain}`)
+  assert.match(chain, /font-weight:600/, `the chain title is bold: ${chain}`)
+
+  const slot = declarations('.cm-node-row[data-session-path="true"] .cm-slot')
+  assert.notEqual(slot, null, 'the chain states itself in the leading icon')
+  assert.match(slot, /color:var\(--dsw-alias-brand-primary/, `the chain folder takes the brand colour: ${slot}`)
+
+  const fill = declarations('.cm-node-row[data-session-path="true"] .cm-row-icon path')
+  assert.notEqual(fill, null, 'the chain fills the folder glyph, not just its outline')
+  assert.match(fill, /fill:currentColor/, `the folder glyph is filled: ${fill}`)
+
+  assert.equal(declarations('.cm-node-row[data-session-path="true"]::before'), null, 'no rail replaced the old lane')
+  assert.match(
+    bundle,
+    /\.cm-node-row\[data-session-path="true"\]:hover \.cm-chevron,[\s\S]*?\{color:var\(--dsw-alias-brand-primary,currentColor\)/,
+    'a hovered or menu-pinned chain row keeps the brand glyph through the fold arrow',
+  )
+})
+
+/**
+ * A clipped row title is revealed in the product's own tooltip surface.
+ *
+ * The bubble is portaled under `<body>` because the column scroller clips and
+ * the band's `container-type` is a containing block for fixed descendants, so
+ * the sheet has to state the viewport-fixed box and the portal layer's z-index
+ * itself. Everything else is the design system's tooltip: its surface token,
+ * type scale, radius, 150ms entry, and the pointer pass-through that keeps a
+ * hover tip from blocking the row it explains.
+ */
+test('the clipped-title tip wears the product tooltip surface and escapes the column', () => {
+  const rule = declarations('.cm-tip')
+  assert.notEqual(rule, null, 'the title tip is missing from the shipped sheet')
+  assert.match(rule, /position:fixed/, `the bubble is viewport-fixed, not clipped by the column: ${rule}`)
+  assert.match(rule, /z-index:1100/, `the portal layer's tooltip z-index: ${rule}`)
+  assert.match(rule, /background:var\(--dsw-alias-tooltip-bg/, `the product tooltip surface token: ${rule}`)
+  assert.match(rule, /color:var\(--dsw-static-neutral-bluish-00/, `the tooltip ink token: ${rule}`)
+  assert.match(rule, /font-size:13px;line-height:20px/, `the product tooltip type scale: ${rule}`)
+  assert.match(rule, /visibility:hidden/, `an unmeasured bubble stays invisible: ${rule}`)
+  assert.match(rule, /pointer-events:none/, `the bubble never takes the pointer: ${rule}`)
+  assert.match(bundle, /@keyframes cm-tip-in/, 'the bubble enters with the product 150ms fade')
+  assert.match(bundle, /@media \(prefers-reduced-motion:reduce\)\{\.cm-tip\{animation:none\}\}/, 'reduced motion keeps it still')
 })

@@ -443,7 +443,8 @@ function toolSpecs(ctx: HostContextLike, store: MapFileStore): ToolSpec[] {
     {
       name: 'map_delete_nodes',
       description: 'Delete up to 50 nodes. mode="leaf" refuses nodes that still have children; mode="subtree" '
-        + 'deletes each target with its whole subtree (children first). Requires confirm=true.',
+        + 'deletes each target with its whole subtree (children first). Conversations are never deleted: ones filed '
+        + 'under removed nodes stay in their Workspace, directly under its row. Requires confirm=true.',
       parameters: {
         type: 'object',
         required: ['node_ids', 'mode', 'confirm'],

@@ -16,7 +16,7 @@ export const MAP_GUIDANCE = [
   '- When the user asks to decompose a goal, lay out an implementation plan, or record a plan structure, persist it with `map_plan_goal` or `map_create_nodes` instead of only writing it in the reply. If no workspace exists yet, ask the user to create one from the map\'s first column (＋ needs a local directory).',
   '- Before creating nodes, call `map_list_workspaces` and `map_get_state` to see what already exists and avoid duplicate trees.',
   '- Node titles are at most 80 characters, descriptions at most 6000; a single call creates/updates at most 50 nodes.',
-  '- Manage existing nodes with `map_update_nodes` / `map_move_nodes`; deletion requires an explicit mode and `confirm: true`.',
+  '- Manage existing nodes with `map_update_nodes` / `map_move_nodes`; deletion requires an explicit mode and `confirm: true`, and `mode="subtree"` removes the whole subtree. Conversations are never deleted: one filed under a removed node stays in its Workspace, directly under the Workspace row.',
   '- File or re-file existing conversations with `map_attach_sessions` (files them under a node) and `map_move_session` (moves them between nodes of the workspace that owns them; omit `node_id` to put a conversation directly under its workspace row). A conversation can never change its workspace, and subagent children can never be filed.',
   '- Step lists for the current session stay in `todo_write`; the map is the cross-session persistent structure. Do not substitute one for the other.',
 ].join('\n')

@@ -11,14 +11,17 @@ import { test } from 'node:test'
 const ZH_TITLES = { defaultWorkspace: '默认工作区', workspaceFallback: '工作区' }
 
 import {
-  DEFAULT_SPACE_TITLE, LOOSE_ROW_PREFIX, MAX_SPACES, MAX_DEPTH, MapError, UNGROUPED_ID, adoptThread, ancestorRowKeys,
-  assignThreadIssue, assignThreads, breadcrumb, childrenOf, conversationVisible, createNode, createSpace, deleteNode, deleteSpace, descendantIds,
-  directThreadsOf, emptyMap, ensureDefaultSpace, homeOfSession, indexableSessions, insertNodeBefore,
-  isRecordedSubagent, isWorkspaceSelectionKey, looseRowKey, looseThreadsInSpace, moveNode, moveNodeIssue, nodePath, parseMapState,
+  DEFAULT_SPACE_TITLE, LOOSE_ROW_PREFIX, MAX_SPACES, MAX_DEPTH, MapError, UNGROUPED_ID,
+  activeChildrenOf, activeDirectThreadsOf, activeMapView, activeThreadsOf, activeTopNodesOf,
+  adoptThread, ancestorRowKeys, archiveKey, archiveNode, archiveSelection, archiveStats, archiveStatsOf,
+  archiveThread, archivedLooseThreadsOf, archivedRootOf, archivedRootsOf,
+  assignThreadIssue, assignThreads, breadcrumb, childrenOf, conversationVisible, createNode, createSpace, deleteNode, deleteNodeSubtree, deleteSpace, descendantIds,
+  directThreadsOf, emptyMap, ensureDefaultSpace, homeOfSession, inArchive, indexableSessions, insertNodeBefore,
+  isArchiveSelectionKey, isArchivedNode, isArchivedThread, isRecordedSubagent, isWorkspaceSelectionKey, looseRowKey, looseThreadsInSpace, moveNode, moveNodeIssue, nodePath, parseMapState,
   pathBaseName, pruneMissing, reconcileSpaces, reconcileWorkspaces, renameSpace, searchMap,
-  selectionAfterNodeDeletion, selectionOfThread, setThreadSpace, setWorkspaceSpace, shortSessionId,
-  spaceList, spaceOfThread, spaceOfWorkspace, syncThreads, threadMoveTargets, threadOfSession, threadsOf, topNodesOf,
-  updateNode, visibleAncestorOf, workspaceDisplayTitle, workspaceKey, workspaceNodeId,
+  selectionAfterNodeDeletion, selectionOfThread, sessionHomeRow, setThreadSpace, setWorkspaceSpace, shortSessionId,
+  spaceList, spaceOfThread, spaceOfWorkspace, subtreeDeletionSummary, syncThreads, threadMoveTargets, threadOfSession, threadsOf, topNodesOf,
+  unarchiveNode, unarchiveThread, updateNode, visibleAncestorOf, workspaceDisplayTitle, workspaceKey, workspaceNodeId,
   workspaceOfNode, workspaceSelection, workspacesInSpace,
 } from '../lib/model.js'
 import { STORAGE_KEY, loadMap, saveMap } from '../lib/persistence.js'
@@ -34,6 +37,29 @@ function seed() {
   state = createNode(state, { parentId: null, workspaceId: 'w1', title: '外贸探索', id: 'a' }).state
   state = createNode(state, { parentId: null, workspaceId: 'w2', title: '产品设计', id: 'b' }).state
   state = createNode(state, { parentId: 'a', workspaceId: 'w1', title: '获客方式', id: 'a1' }).state
+  return state
+}
+
+/**
+ * The shared archive fixture.
+ *
+ * Workspace `w1` keeps one active root (`a`), one archived block (`a1 > a11`),
+ * one conversation still in the active tree (`live`), one travelling with the
+ * block (`blocked`), and one archived on its own (`loose`). Workspace `w2` keeps
+ * its ordinary tree.
+ */
+function archivedSeed() {
+  let state = seed()
+  state = createNode(state, { parentId: 'a1', title: '更深的子题', id: 'a11' }).state
+  state = syncThreads(state, [
+    { id: 'live', displayTitle: '活跃会话', updatedAt: 1000 },
+    { id: 'blocked', displayTitle: '块内会话', updatedAt: 3000 },
+    { id: 'loose', displayTitle: '独立归档会话', updatedAt: 2000 },
+  ], null, new Map([['live', 'w1'], ['blocked', 'w1'], ['loose', 'w1']]))
+  state = assignThreads(state, ['live'], 'a')
+  state = assignThreads(state, ['blocked'], 'a11')
+  state = archiveThread(state, 'loose')
+  state = archiveNode(state, 'a1')
   return state
 }
 
@@ -259,6 +285,50 @@ test('a node with children cannot be deleted', () => {
   )
 })
 
+test('deleting a subtree removes every descendant and frees its conversations', () => {
+  let state = seed()
+  state = createNode(state, { parentId: 'a1', workspaceId: 'w1', title: '深一层', id: 'a11' }).state
+  state = syncThreads(state, [
+    { id: 's1', displayTitle: '跨境建议' },
+    { id: 's2', displayTitle: '产品讨论' },
+  ], null, new Map([['s1', 'w1'], ['s2', 'w1']]))
+  state = assignThreads(state, ['s1'], 'a11')
+  state = assignThreads(state, ['s2'], 'a')
+  const before = state.revision
+  const next = deleteNodeSubtree(state, 'a')
+  assert.equal(next.nodes.some(node => ['a', 'a1', 'a11'].includes(node.id)), false, 'the root and every descendant are gone')
+  assert.ok(next.nodes.some(node => node.id === 'b'), 'a sibling root survives')
+  assert.equal(next.revision, before + 1, 'the whole subtree leaves in one revision bump')
+  assert.deepEqual(
+    directThreadsOf(next, 'w1').map(thread => thread.sessionId).sort(),
+    ['s1', 's2'],
+    'conversations under the removed subtree stay in the Workspace, directly under its row',
+  )
+  assert.deepEqual(
+    next.threads.map(thread => thread.title).sort(),
+    ['产品讨论', '跨境建议'],
+    'conversation rows keep their own data',
+  )
+})
+
+test('subtreeDeletionSummary counts descendants and filed conversations', () => {
+  let state = seed()
+  state = createNode(state, { parentId: 'a1', workspaceId: 'w1', title: '深一层', id: 'a11' }).state
+  state = syncThreads(state, [{ id: 's1', displayTitle: '跨境建议' }], null, new Map([['s1', 'w1']]))
+  state = assignThreads(state, ['s1'], 'a1')
+  assert.deepEqual(subtreeDeletionSummary(state, 'a'), { nodes: 2, conversations: 1 }, 'a11 and a1 count as descendants; the filed conversation is counted')
+  assert.deepEqual(subtreeDeletionSummary(state, 'a1'), { nodes: 1, conversations: 1 }, 'the root itself never counts as one of the nodes below')
+  assert.deepEqual(subtreeDeletionSummary(state, 'b'), { nodes: 0, conversations: 0 }, 'a leaf has nothing below it')
+  assert.deepEqual(subtreeDeletionSummary(state, 'missing'), { nodes: 0, conversations: 0 }, 'an unknown id is a zero read, not an error')
+})
+
+test('deleting a missing subtree root reports NOT_FOUND', () => {
+  assert.throws(
+    () => deleteNodeSubtree(seed(), 'missing'),
+    (error) => error instanceof MapError && error.code === 'NOT_FOUND',
+  )
+})
+
 test('each conversation has exactly one topic inside its Workspace', () => {
   let state = seed()
   state = syncThreads(state, [{ id: 's1', displayTitle: '跨境建议' }], null, new Map([['s1', 'w1']]))
@@ -298,6 +368,125 @@ test('pruning drops conversations the catalog no longer lists', () => {
   const pruned = pruneMissing(state, new Set(['s1']))
   assert.deepEqual(pruned.threads.map(thread => thread.sessionId), ['s1'])
   assert.equal(pruneMissing(pruned, new Set(['s1', 's2'])), pruned, 'an unchanged catalog keeps state identity')
+})
+
+test('a forked conversation joins the topic of the conversation it branched from', () => {
+  let state = syncThreads(seed(), [{ id: 'src', displayTitle: '源会话' }], null, new Map([['src', 'w1']]))
+  state = assignThreads(state, ['src'], 'a1')
+  state = syncThreads(state, [
+    { id: 'src', displayTitle: '源会话' },
+    // The catalog names the source conversation through `parentId`; DSH also
+    // renames the child, which is why the row reads like a branch.
+    { id: 'fork', parentId: 'src', displayTitle: '源会话 (1)' },
+  ], null, new Map([['src', 'w1'], ['fork', 'w1']]))
+  const fork = threadOfSession(state, 'fork')
+  assert.equal(fork.nodeId, 'a1', 'the branch is filed beside its source, not at the Workspace root')
+  assert.equal(fork.workspaceId, 'w1', 'and in the Workspace the Host accounts it to')
+  assert.deepEqual(threadsOf(state, 'a1').map(thread => thread.sessionId).sort(), ['fork', 'src'])
+  assert.deepEqual(directThreadsOf(state, 'w1'), [], 'nothing was left directly under the Workspace')
+})
+
+test('a fork inherits its source Workspace when the Host accounting lags the catalog row', () => {
+  let state = syncThreads(seed(), [{ id: 'src', displayTitle: '源会话' }], null, new Map([['src', 'w1']]))
+  state = assignThreads(state, ['src'], 'a1')
+  // The catalog can report the fork one snapshot before the Workspace list
+  // accounts it. Without the source's owner the topic below would be dropped by
+  // the reconciliation that follows the sync.
+  state = syncThreads(state, [
+    { id: 'src', displayTitle: '源会话' },
+    { id: 'fork', parentId: 'src', displayTitle: '源会话 (1)' },
+  ], null, new Map([['src', 'w1']]))
+  const fork = threadOfSession(state, 'fork')
+  assert.equal(fork.workspaceId, 'w1', 'the source Workspace is inherited while the Host list catches up')
+  assert.equal(fork.nodeId, 'a1')
+  state = reconcileWorkspaces(state, [workspace('w1', 'alpha', ['src', 'fork'])])
+  assert.equal(threadOfSession(state, 'fork').nodeId, 'a1', 'the inherited place survives reconciliation')
+})
+
+test('a fork whose source is not indexed stays directly under its Workspace', () => {
+  const state = syncThreads(seed(), [
+    { id: 'fork', parentId: 'ghost', displayTitle: '无源分支' },
+  ], null, new Map([['fork', 'w1']]))
+  const fork = threadOfSession(state, 'fork')
+  assert.equal(fork.nodeId, null, 'the map does not invent a topic for an unknown source')
+  assert.equal(fork.workspaceId, 'w1')
+})
+
+test('a fork of a topic in another Workspace does not inherit that topic', () => {
+  let state = syncThreads(seed(), [{ id: 'src', displayTitle: '源会话' }], null, new Map([['src', 'w2']]))
+  state = assignThreads(state, ['src'], 'b')
+  // Defensive: the Host attaches a fork to its source's Workspace, so a
+  // disagreement here means stale accounting rather than a legal state.
+  state = syncThreads(state, [
+    { id: 'src', displayTitle: '源会话' },
+    { id: 'fork', parentId: 'src', displayTitle: '源会话 (1)' },
+  ], null, new Map([['src', 'w2'], ['fork', 'w1']]))
+  const fork = threadOfSession(state, 'fork')
+  assert.equal(fork.nodeId, null, 'a topic never holds a conversation of another Workspace')
+  assert.equal(fork.workspaceId, 'w1', 'the Host accounting still wins')
+})
+
+test('a fork of a fork inherits through the chain, whatever order the catalog lists', () => {
+  let state = syncThreads(seed(), [{ id: 'src', displayTitle: '源会话' }], null, new Map([['src', 'w1']]))
+  state = assignThreads(state, ['src'], 'a1')
+  // Both rows are new in one snapshot, and the catalog lists the child first:
+  // the second pass has to place the middle row before the leaf can inherit.
+  state = syncThreads(state, [
+    { id: 'leaf', parentId: 'middle', displayTitle: '源会话 (2)' },
+    { id: 'middle', parentId: 'src', displayTitle: '源会话 (1)' },
+    { id: 'src', displayTitle: '源会话' },
+  ], null, new Map([['src', 'w1'], ['middle', 'w1'], ['leaf', 'w1']]))
+  assert.equal(threadOfSession(state, 'middle').nodeId, 'a1')
+  assert.equal(threadOfSession(state, 'leaf').nodeId, 'a1')
+})
+
+test('a fork the reader already filed keeps its place on later syncs', () => {
+  let state = syncThreads(seed(), [
+    { id: 'src', displayTitle: '源会话' },
+    { id: 'fork', parentId: 'src', displayTitle: '源会话 (1)' },
+  ], null, new Map([['src', 'w1'], ['fork', 'w1']]))
+  state = assignThreads(state, ['src'], 'a')
+  // The reader deliberately moved the branch to another topic (or to the
+  // Workspace root); a later catalog sync must not pull it back to its source.
+  state = assignThreads(state, ['fork'], null)
+  const synced = syncThreads(state, [
+    { id: 'src', displayTitle: '源会话' },
+    { id: 'fork', parentId: 'src', displayTitle: '源会话 (1)' },
+  ], null, new Map([['src', 'w1'], ['fork', 'w1']]))
+  assert.equal(threadOfSession(synced, 'fork').nodeId, null, 'inheritance only decides a row the map has never filed')
+  assert.deepEqual(directThreadsOf(synced, 'w1').map(thread => thread.sessionId), ['fork'])
+})
+
+test('a fork of a loose conversation keeps its source space', () => {
+  let state = ensureDefaultSpace(emptyMap())
+  state = createSpace(state, { title: '家庭', id: 'fam' }).state
+  state = syncThreads(state, [{ id: 'src', displayTitle: '散落会话' }], null)
+  state = setThreadSpace(state, 'src', 'fam')
+  state = syncThreads(state, [
+    { id: 'src', displayTitle: '散落会话' },
+    { id: 'fork', parentId: 'src', displayTitle: '散落会话 (1)' },
+  ], null)
+  assert.equal(threadOfSession(state, 'fork').spaceId, 'fam', 'the branch stays in the space the reader filed its source into')
+  assert.equal(threadOfSession(state, 'fork').nodeId, null, 'a loose conversation has no topic to inherit')
+})
+
+test('a self-parented catalog row is not a source', () => {
+  const state = syncThreads(seed(), [
+    { id: 'self', parentId: 'self', displayTitle: '自指' },
+  ], null, new Map([['self', 'w1']]))
+  assert.equal(threadOfSession(state, 'self').nodeId, null, 'a row cannot inherit from itself')
+})
+
+test('a fork whose source topic was deleted falls back to the Workspace root', () => {
+  let state = syncThreads(seed(), [{ id: 'src', displayTitle: '源会话' }], null, new Map([['src', 'w1']]))
+  state = assignThreads(state, ['src'], 'a1')
+  state = deleteNode(state, 'a1')
+  state = syncThreads(state, [
+    { id: 'src', displayTitle: '源会话' },
+    { id: 'fork', parentId: 'src', displayTitle: '源会话 (1)' },
+  ], null, new Map([['src', 'w1'], ['fork', 'w1']]))
+  assert.equal(threadOfSession(state, 'fork').nodeId, null, 'a stale source topic is not resurrected as a destination')
+  assert.deepEqual(directThreadsOf(state, 'w1').map(thread => thread.sessionId).sort(), ['fork', 'src'])
 })
 
 test('syncing records a subagent child without giving it a row, and never invents one', () => {
@@ -667,9 +856,40 @@ test('a topic that outlived its deletion in the index activates its Workspace in
   assert.equal(selectionOfThread(stale, thread), workspaceKey('w1'))
 })
 
-test('an ungrouped conversation activates no node', () => {
+test('an ungrouped conversation activates its space ungrouped row', () => {
+  // The tree's position is derived from the conversation: an ungrouped one has
+  // no node, but it does have a place — its space's ungrouped row. Returning
+  // "no selection" would leave the reader in an unrelated branch, which is the
+  // exact confusion this rule exists to prevent.
   const state = syncThreads(seed(), [{ id: 's4', displayTitle: '散落', updatedAt: 0 }], null, new Map([['s4', null]]))
-  assert.equal(selectionOfThread(state, threadOfSession(state, 's4')), null)
+  assert.equal(selectionOfThread(state, threadOfSession(state, 's4')), looseRowKey(state, state.defaultSpaceId))
+})
+
+test('the home row names the topic, the Workspace row, the ungrouped row, or the archive row', () => {
+  let state = seed()
+  state = syncThreads(state, [
+    { id: 'under-topic', displayTitle: '主题下', updatedAt: 0 },
+    { id: 'under-workspace', displayTitle: '工作区直挂', updatedAt: 0 },
+    { id: 'loose', displayTitle: '散落', updatedAt: 0 },
+  ], null, new Map([['under-topic', 'w1'], ['under-workspace', 'w2'], ['loose', null]]))
+  state = assignThreads(state, ['under-topic'], 'a1')
+  const topicHome = sessionHomeRow(state, 'under-topic')
+  assert.equal(topicHome.selection, 'a1')
+  assert.equal(topicHome.nodeId, 'a1')
+  assert.equal(topicHome.workspaceId, 'w1')
+  assert.equal(topicHome.spaceId, spaceOfWorkspace(state, 'w1'))
+  assert.equal(sessionHomeRow(state, 'under-workspace').selection, workspaceKey('w2'))
+  assert.equal(sessionHomeRow(state, 'loose').selection, looseRowKey(state, state.defaultSpaceId))
+  assert.equal(sessionHomeRow(state, 'missing'), undefined)
+  assert.equal(sessionHomeRow(state, null), undefined)
+})
+
+test('an archived conversation is reached through its Workspace archive row', () => {
+  let state = seed()
+  state = syncThreads(state, [{ id: 'archived', displayTitle: '归档对话', updatedAt: 0 }], null, new Map([['archived', 'w2']]))
+  state = archiveThread(state, 'archived')
+  assert.equal(sessionHomeRow(state, 'archived').selection, archiveKey('w2'))
+  assert.equal(selectionOfThread(state, threadOfSession(state, 'archived')), archiveKey('w2'))
 })
 
 /* ── spaces ─────────────────────────────────────────────────────────────── */
@@ -1348,4 +1568,698 @@ test('a legacy default-space title migrates to the neutral marker, user titles s
   assert.equal(migrated.spaces[0].title, DEFAULT_SPACE_TITLE, 'the legacy marker is rewritten on read')
   const renamed = { ...legacy, spaces: [{ ...legacy.spaces[0], title: '工作空间' }] }
   assert.equal(parseMapState(JSON.stringify(renamed)).spaces[0].title, '工作空间', 'a typed title is user data')
+})
+
+/* ── archive: detach, restore, guards, and reconciliation ────────────────── */
+
+test('the archive selection key names one Workspace archive row', () => {
+  assert.equal(archiveKey('w1'), '@archive:w1', 'the key carries the Workspace whose archive it opens')
+  assert.equal(isArchiveSelectionKey(null), false)
+  assert.equal(isArchiveSelectionKey(undefined), false)
+  assert.equal(isArchiveSelectionKey(UNGROUPED_ID), false, 'the ungrouped bucket has no archive')
+  assert.equal(isArchiveSelectionKey(workspaceNodeId('w1')), false, 'a Workspace row is not an archive row')
+  assert.equal(isArchiveSelectionKey(archiveKey('w1')), true)
+  assert.deepEqual(archiveSelection(archiveKey('w1')), { workspaceId: 'w1' })
+  assert.equal(archiveSelection(workspaceNodeId('w1')), undefined, 'a Workspace key names the Workspace, not its archive')
+  assert.equal(archiveSelection(null), undefined)
+})
+
+test('archiving a topic detaches its whole block and remembers the old parent', () => {
+  let state = seed()
+  state = createNode(state, { parentId: 'a1', title: '更深的子题', id: 'a11' }).state
+  const before = state.nodes.find(node => node.id === 'a1')
+  const archived = archiveNode(state, 'a1')
+  const root = archived.nodes.find(node => node.id === 'a1')
+  assert.equal(root.parentId, null, 'the block root is taken out of the tree')
+  assert.equal(root.archivedParentId, 'a', 'the parent it returns to is remembered')
+  assert.equal(typeof root.archivedAt, 'string', 'the archive is stamped')
+  assert.equal(root.workspaceId, 'w1', 'archiving never moves a topic out of its Workspace')
+  assert.equal(root.position, before.position, 'archiving is not an edit: the slot is kept')
+  assert.equal(root.updatedAt, before.updatedAt)
+  const child = archived.nodes.find(node => node.id === 'a11')
+  assert.equal(child.parentId, 'a1', 'descendants stay inside the block')
+  assert.equal(child.archivedAt, undefined, 'N1: only the detached root carries a mark')
+  assert.equal(inArchive(archived, 'a11'), true, 'a descendant is in the archive through its root')
+  assert.equal(inArchive(archived, 'a'), false, 'an active topic is not')
+  assert.equal(archivedRootOf(archived, 'a11')?.id, 'a1', 'the nearest marked ancestor is the block root')
+  assert.deepEqual(
+    topNodesOf(archived, 'w1').map(node => node.id).sort(),
+    ['a', 'a1'],
+    'the stored view still sees the detached root',
+  )
+  assert.deepEqual(activeTopNodesOf(archived, 'w1').map(node => node.id), ['a'], 'the active view does not')
+  assert.deepEqual(childrenOf(archived, 'a'), [], 'the appended position is not a child slot')
+  assert.deepEqual(activeChildrenOf(archived, 'a'), [])
+  assert.equal(archived.revision, state.revision + 1, 'the whole block leaves in one revision bump')
+})
+
+test('archiving a topic absorbs marks the block already carries', () => {
+  let state = seed()
+  state = createNode(state, { parentId: 'a1', title: '更深的子题', id: 'a11' }).state
+  state = syncThreads(state, [{ id: 'blocked', displayTitle: '块内会话' }], null, new Map([['blocked', 'w1']]))
+  state = assignThreads(state, ['blocked'], 'a1')
+  state = archiveThread(state, 'blocked')
+  // A hand-built document may carry a mark below a block that gets archived later.
+  state = {
+    ...state,
+    nodes: state.nodes.map(node => node.id === 'a11'
+      ? { ...node, archivedAt: '2024-01-01T00:00:00.000Z', archivedParentId: 'a1' }
+      : node),
+  }
+  const archived = archiveNode(state, 'a1')
+  assert.equal(threadOfSession(archived, 'blocked').archivedAt, undefined, 'the block now owns the conversation (N2)')
+  assert.equal(isArchivedNode(archived.nodes.find(node => node.id === 'a11')), false, 'the descendant mark is absorbed (N1)')
+  assert.equal(isArchivedNode(archived.nodes.find(node => node.id === 'a1')), true)
+})
+
+test('archiving a parent absorbs a child block that was archived first', () => {
+  let state = seed()
+  state = createNode(state, { parentId: 'a1', title: '更深的子题', id: 'a11' }).state
+  state = syncThreads(state, [{ id: 'in-block', displayTitle: '块内会话' }], null, new Map([['in-block', 'w1']]))
+  state = assignThreads(state, ['in-block'], 'a11')
+  state = archiveNode(state, 'a1')
+  assert.deepEqual(archivedRootsOf(state, 'w1').map(node => node.id), ['a1'], 'the child block is out first')
+  const absorbed = archiveNode(state, 'a')
+  assert.deepEqual(archivedRootsOf(absorbed, 'w1').map(node => node.id), ['a'], 'one block, not two parallel roots')
+  assert.equal(absorbed.revision, state.revision + 1, 'the fold and the archive are one revision bump')
+  assert.equal(isArchivedNode(absorbed.nodes.find(node => node.id === 'a1')), false, 'the child root is folded back in')
+  assert.equal(absorbed.nodes.find(node => node.id === 'a1').archivedParentId, undefined)
+  assert.equal(absorbed.nodes.find(node => node.id === 'a1').parentId, 'a')
+  assert.equal(absorbed.nodes.find(node => node.id === 'a11').parentId, 'a1')
+  assert.equal(isArchivedThread(threadOfSession(absorbed, 'in-block')), false, 'the block conversation stays unmarked (N2)')
+  const restored = unarchiveNode(absorbed, 'a')
+  assert.equal(restored.nodes.find(node => node.id === 'a1').parentId, 'a', 'unarchiving the parent brings the whole block back')
+  assert.equal(restored.nodes.find(node => node.id === 'a11').parentId, 'a1')
+  assert.deepEqual(archivedRootsOf(restored, 'w1'), [])
+})
+
+test('archiving a topic folds a chain of archived ancestors back into the block', () => {
+  // Pre-fix documents can nest archived roots: `z` remembers `y`, `y` remembers
+  // `x`, and `x` is a live child of `n`, so archiving `n` has to fold the chain.
+  const archivedRow = (id, archivedParentId, position) => ({
+    id, parentId: null, workspaceId: 'w1', title: id.toUpperCase(), description: '', position,
+    updatedAt: '', archivedAt: '2024-01-01T00:00:00.000Z', archivedParentId,
+  })
+  const state = {
+    ...ensureDefaultSpace(emptyMap()),
+    nodes: [
+      { id: 'n', parentId: null, workspaceId: 'w1', title: 'N', description: '', position: 1, updatedAt: '' },
+      { id: 'x', parentId: 'n', title: 'X', description: '', position: 1, updatedAt: '' },
+      archivedRow('y', 'x', 2),
+      archivedRow('z', 'y', 3),
+    ],
+    threads: [],
+  }
+  const archived = archiveNode(state, 'n')
+  assert.deepEqual(archivedRootsOf(archived, 'w1').map(node => node.id), ['n'], 'the whole chain joins the block')
+  assert.equal(archived.nodes.find(node => node.id === 'y').parentId, 'x')
+  assert.equal(archived.nodes.find(node => node.id === 'z').parentId, 'y')
+  assert.deepEqual(
+    archived.nodes.filter(node => isArchivedNode(node)).map(node => node.id),
+    ['n'],
+    'and only the block root carries a mark',
+  )
+})
+
+test('an archived block anchored outside the topic is not absorbed', () => {
+  let state = seed()
+  state = archiveNode(state, 'a1')
+  state = archiveNode(state, 'b')
+  assert.deepEqual(archivedRootsOf(state, 'w1').map(node => node.id), ['a1'], 'its anchor is not in the archived subtree')
+  assert.deepEqual(archivedRootsOf(state, 'w2').map(node => node.id), ['b'], 'a sibling Workspace archive is untouched')
+})
+
+test('an archived block filed under another Workspace cannot be folded in', () => {
+  // Dirty data only: a fold would silently move another Workspace's block into
+  // this one, so the block stays an independent archived item.
+  const state = {
+    ...ensureDefaultSpace(emptyMap()),
+    nodes: [
+      { id: 'n', parentId: null, workspaceId: 'w1', title: 'N', description: '', position: 1, updatedAt: '' },
+      { id: 'x', parentId: 'n', title: 'X', description: '', position: 1, updatedAt: '' },
+      { id: 'r', parentId: null, workspaceId: 'w9', title: 'R', description: '', position: 1, updatedAt: '', archivedAt: '2024-01-01T00:00:00.000Z', archivedParentId: 'x' },
+    ],
+    threads: [],
+  }
+  const archived = archiveNode(state, 'n')
+  assert.deepEqual(archivedRootsOf(archived, 'w1').map(node => node.id), ['n'])
+  assert.equal(isArchivedNode(archived.nodes.find(node => node.id === 'r')), true, 'the foreign block stays archived')
+  assert.equal(archivedRootsOf(archived, 'w9').length, 1)
+})
+
+test('a cyclic remembered chain is left as independent archived blocks', () => {
+  const archivedRow = (id, archivedParentId, position) => ({
+    id, parentId: null, workspaceId: 'w1', title: id.toUpperCase(), description: '', position,
+    updatedAt: '', archivedAt: '2024-01-01T00:00:00.000Z', archivedParentId,
+  })
+  const state = {
+    ...ensureDefaultSpace(emptyMap()),
+    nodes: [
+      { id: 'n', parentId: null, workspaceId: 'w1', title: 'N', description: '', position: 1, updatedAt: '' },
+      archivedRow('r1', 'r2', 2),
+      archivedRow('r2', 'r1', 3),
+    ],
+    threads: [],
+  }
+  const archived = archiveNode(state, 'n')
+  assert.equal(isArchivedNode(archived.nodes.find(node => node.id === 'r1')), true, 'the loop is left alone')
+  assert.equal(isArchivedNode(archived.nodes.find(node => node.id === 'r2')), true)
+  assert.deepEqual(archivedRootsOf(archived, 'w1').map(node => node.id).sort(), ['n', 'r1', 'r2'])
+})
+
+test('archiving a topic is idempotent and refuses what it cannot hold', () => {
+  const state = archivedSeed()
+  assert.equal(archiveNode(state, 'a1'), state, 'a second archive returns the same state')
+  assert.equal(archiveNode(state, 'a11'), state, 'a topic inside a block is already archived')
+  assert.throws(
+    () => archiveNode(seed(), 'ghost'),
+    (error) => error instanceof MapError && error.code === 'NOT_FOUND',
+  )
+  const ungrouped = createNode(emptyMap(), { parentId: null, workspaceId: null, title: '散落主题', id: 'u1' }).state
+  assert.throws(
+    () => archiveNode(ungrouped, 'u1'),
+    (error) => error instanceof MapError && error.code === 'WORKSPACE',
+    'ungrouped content has no archive row to live behind',
+  )
+})
+
+test('archiving a conversation keeps its filing and is idempotent', () => {
+  let state = seed()
+  state = syncThreads(state, [{ id: 's1', displayTitle: '会话一' }], null, new Map([['s1', 'w1']]))
+  state = assignThreads(state, ['s1'], 'a1')
+  const archived = archiveThread(state, 's1')
+  const thread = threadOfSession(archived, 's1')
+  assert.equal(thread.nodeId, 'a1', 'the topic it returns to is remembered')
+  assert.equal(thread.workspaceId, 'w1', 'the Workspace is untouched')
+  assert.equal(typeof thread.archivedAt, 'string')
+  assert.equal(archiveThread(archived, 's1'), archived, 'a second archive returns the same state')
+  assert.throws(
+    () => archiveThread(archived, 'ghost'),
+    (error) => error instanceof MapError && error.code === 'NO_THREAD',
+  )
+  const ungrouped = syncThreads(emptyMap(), [{ id: 'loose', displayTitle: '散落' }], null, new Map([['loose', null]]))
+  assert.throws(
+    () => archiveThread(ungrouped, 'loose'),
+    (error) => error instanceof MapError && error.code === 'WORKSPACE',
+  )
+})
+
+test('archived roots are listed newest archive first, then by title', () => {
+  let state = seed()
+  state = createNode(state, { parentId: null, workspaceId: 'w1', title: 'Alpha', id: 'x1' }).state
+  state = createNode(state, { parentId: null, workspaceId: 'w1', title: 'Beta', id: 'x3' }).state
+  state = createNode(state, { parentId: null, workspaceId: 'w1', title: 'Old', id: 'x2' }).state
+  const stamp = (stampValue, next) => ({
+    ...next,
+    nodes: next.nodes.map(node => ['a', 'x1', 'x2', 'x3'].includes(node.id)
+      ? { ...node, archivedAt: stampValue[node.id] ?? node.archivedAt }
+      : node),
+  })
+  state = stamp({ a: '2024-01-01T00:00:00.000Z' }, archiveNode(state, 'a'))
+  state = stamp({ x1: '2024-01-02T00:00:00.000Z' }, archiveNode(state, 'x1'))
+  state = stamp({ x3: '2024-01-02T00:00:00.000Z' }, archiveNode(state, 'x3'))
+  state = stamp({ x2: '2024-01-03T00:00:00.000Z' }, archiveNode(state, 'x2'))
+  assert.deepEqual(
+    archivedRootsOf(state, 'w1').map(node => node.id),
+    ['x2', 'x1', 'x3', 'a'],
+    'newest first; the same stamp falls back to title order',
+  )
+  assert.deepEqual(archivedRootsOf(state, 'w2'), [], 'another Workspace has its own archive')
+})
+
+test('conversations archived on their own are listed newest activity first', () => {
+  let state = seed()
+  state = syncThreads(state, [
+    { id: 'older', displayTitle: '旧', updatedAt: 1000 },
+    { id: 'newer', displayTitle: '新', updatedAt: 3000 },
+    { id: 'middle', displayTitle: '中', updatedAt: 2000 },
+    { id: 'blocked', displayTitle: '块内' },
+  ], null, new Map([['older', 'w1'], ['newer', 'w1'], ['middle', 'w1'], ['blocked', 'w1']]))
+  state = assignThreads(state, ['blocked'], 'a1')
+  state = archiveThread(state, 'older')
+  state = archiveThread(state, 'newer')
+  state = archiveThread(state, 'middle')
+  state = archiveNode(state, 'a1')
+  assert.deepEqual(
+    archivedLooseThreadsOf(state, 'w1').map(thread => thread.sessionId),
+    ['newer', 'middle', 'older'],
+    'independently archived conversations, newest first',
+  )
+  assert.deepEqual(archivedLooseThreadsOf(state, 'w2'), [])
+})
+
+test('archiveStatsOf counts block roots and every conversation the archive holds', () => {
+  const state = archivedSeed()
+  assert.deepEqual(
+    archiveStatsOf(state, 'w1'),
+    { nodes: 1, sessions: 2 },
+    'one archived block with one conversation, plus one archived on its own',
+  )
+  assert.deepEqual(archiveStatsOf(state, 'w2'), { nodes: 0, sessions: 0 })
+  assert.deepEqual(archiveStats(state), { nodes: 1, sessions: 2 }, 'the global count sums every Workspace')
+  assert.deepEqual(archiveStats(seed()), { nodes: 0, sessions: 0 })
+})
+
+test('the active views hide the archive without changing the stored tree', () => {
+  const state = archivedSeed()
+  assert.deepEqual(activeTopNodesOf(state, 'w1').map(node => node.id), ['a'])
+  assert.deepEqual(activeChildrenOf(state, 'a'), [])
+  assert.deepEqual(activeThreadsOf(state, 'a').map(thread => thread.sessionId), ['live'])
+  assert.deepEqual(activeDirectThreadsOf(state, 'w1'), [], 'the archived loose conversation left the Workspace row')
+  const view = activeMapView(state)
+  assert.deepEqual(view.nodes.map(node => node.id).sort(), ['a', 'b'])
+  assert.deepEqual(view.threads.map(thread => thread.sessionId), ['live'])
+  assert.equal(view.revision, state.revision, 'a view is a read, not a mutation')
+  assert.deepEqual(state.nodes.map(node => node.id).sort(), ['a', 'a1', 'a11', 'b'], 'the document keeps the archive')
+  assert.deepEqual(state.threads.map(thread => thread.sessionId).sort(), ['blocked', 'live', 'loose'])
+})
+
+test('unarchiving a topic returns it to its original sibling slot', () => {
+  let state = seed()
+  state = createNode(state, { parentId: 'a', title: '第二个子题', id: 'a2' }).state
+  state = createNode(state, { parentId: 'a', title: '第三个子题', id: 'a3' }).state
+  state = archiveNode(state, 'a2')
+  const restored = unarchiveNode(state, 'a2')
+  const node = restored.nodes.find(candidate => candidate.id === 'a2')
+  assert.equal(node.parentId, 'a')
+  assert.equal(node.archivedAt, undefined)
+  assert.equal(node.archivedParentId, undefined)
+  assert.deepEqual(childrenOf(restored, 'a').map(child => child.id), ['a1', 'a2', 'a3'], 'the middle slot is restored')
+  assert.deepEqual(childrenOf(restored, 'a').map(child => child.position), [1, 2, 3], 'siblings are renumbered around it')
+})
+
+test('restoring the first and the last sibling puts each back in place', () => {
+  let state = seed()
+  state = createNode(state, { parentId: 'a', title: '第二个子题', id: 'a2' }).state
+  state = createNode(state, { parentId: 'a', title: '第三个子题', id: 'a3' }).state
+  let restored = unarchiveNode(archiveNode(state, 'a1'), 'a1')
+  assert.deepEqual(childrenOf(restored, 'a').map(child => child.id), ['a1', 'a2', 'a3'], 'the first slot is restored')
+  restored = unarchiveNode(archiveNode(restored, 'a3'), 'a3')
+  assert.deepEqual(childrenOf(restored, 'a').map(child => child.id), ['a1', 'a2', 'a3'], 'the last slot is restored')
+})
+
+test('a restored slot past the end of the current list clamps to the end', () => {
+  let state = seed()
+  state = createNode(state, { parentId: 'a', title: '第二个子题', id: 'a2' }).state
+  state = createNode(state, { parentId: 'a', title: '第三个子题', id: 'a3' }).state
+  state = archiveNode(state, 'a2')
+  state = deleteNodeSubtree(state, 'a1')
+  const restored = unarchiveNode(state, 'a2')
+  assert.deepEqual(childrenOf(restored, 'a').map(child => child.id), ['a3', 'a2'], 'the original slot no longer exists')
+})
+
+test('the Workspace-top fallback also restores the original position slot', () => {
+  let state = seed()
+  state = createNode(state, { parentId: null, workspaceId: 'w1', title: '第二个顶层主题', id: 'a2' }).state
+  state = createNode(state, { parentId: null, workspaceId: 'w1', title: '第三个顶层主题', id: 'a3' }).state
+  state = archiveNode(state, 'a2')
+  const restored = unarchiveNode(state, 'a2')
+  assert.deepEqual(topNodesOf(restored, 'w1').map(node => node.id), ['a', 'a2', 'a3'])
+})
+
+test('unarchiving a topic falls back to the Workspace top level when the parent is gone', () => {
+  let state = seed()
+  state = archiveNode(state, 'a1')
+  state = deleteNodeSubtree(state, 'a')
+  const restored = unarchiveNode(state, 'a1')
+  const node = restored.nodes.find(candidate => candidate.id === 'a1')
+  assert.equal(node.parentId, null, 'the Workspace top level is the fallback')
+  assert.equal(node.archivedParentId, undefined, 'the stale location is forgotten')
+  assert.deepEqual(activeTopNodesOf(restored, 'w1').map(top => top.id), ['a1'])
+})
+
+test('unarchiving a topic releases the archived block that holds its remembered parent', () => {
+  let state = seed()
+  state = archiveNode(state, 'a1')
+  // Reproduce a document written before parents absorbed their archived children:
+  // the parent was archived while the child block was already out, so both roots
+  // sit in the archive instead of one block.
+  state = {
+    ...state,
+    nodes: state.nodes.map(node => node.id === 'a'
+      ? { ...node, archivedAt: '2024-01-01T00:00:00.000Z', archivedParentId: null }
+      : node),
+  }
+  assert.deepEqual(archivedRootsOf(state, 'w1').map(node => node.id).sort(), ['a', 'a1'])
+  const restored = unarchiveNode(state, 'a1')
+  assert.equal(isArchivedNode(restored.nodes.find(node => node.id === 'a')), false, 'the parent block is released first')
+  assert.equal(restored.nodes.find(node => node.id === 'a').parentId, null)
+  assert.equal(restored.nodes.find(node => node.id === 'a1').parentId, 'a', 'then the child returns under it')
+  assert.equal(restored.nodes.find(node => node.id === 'a1').archivedAt, undefined)
+})
+
+test('restoring a topic whose parent is still archived keeps its sibling slot', () => {
+  let state = emptyMap()
+  state = createNode(state, { parentId: null, workspaceId: 'w1', title: '父主题', id: 'p' }).state
+  state = createNode(state, { parentId: 'p', title: '第一个子题', id: 'c1' }).state
+  state = createNode(state, { parentId: 'p', title: '第二个子题', id: 'c2' }).state
+  state = createNode(state, { parentId: 'p', title: '第三个子题', id: 'c3' }).state
+  state = archiveNode(state, 'c2')
+  state = { ...state, nodes: state.nodes.map(node => node.id === 'p' ? { ...node, archivedAt: '2024-01-01T00:00:00.000Z', archivedParentId: null } : node) }
+  const restored = unarchiveNode(state, 'c2')
+  assert.equal(restored.nodes.find(node => node.id === 'p').archivedAt, undefined)
+  assert.deepEqual(childrenOf(restored, 'p').map(child => child.id), ['c1', 'c2', 'c3'], 'the cascade and the slot work together')
+})
+
+test('archived roots that remember each other are restored without recursing forever', () => {
+  const archivedRow = (id, archivedParentId, position) => ({
+    id, parentId: null, workspaceId: 'w1', title: id.toUpperCase(), description: '', position,
+    updatedAt: '', archivedAt: '2024-01-01T00:00:00.000Z', archivedParentId,
+  })
+  const pair = {
+    ...ensureDefaultSpace(emptyMap()),
+    nodes: [archivedRow('p', 'q', 1), archivedRow('q', 'p', 2)],
+    threads: [],
+  }
+  const restored = unarchiveNode(pair, 'p')
+  assert.equal(isArchivedNode(restored.nodes.find(node => node.id === 'p')), false)
+  assert.equal(isArchivedNode(restored.nodes.find(node => node.id === 'q')), false)
+  assert.equal(restored.nodes.find(node => node.id === 'p').parentId, 'q', 'the released parent is used once it is active')
+  assert.equal(restored.nodes.filter(node => node.parentId !== null).length, 1, 'the loop is flattened, not rebuilt')
+
+  const selfParent = {
+    ...ensureDefaultSpace(emptyMap()),
+    nodes: [archivedRow('s', 's', 1)],
+    threads: [],
+  }
+  const selfRestored = unarchiveNode(selfParent, 's')
+  assert.equal(selfRestored.nodes[0].parentId, null, 'a self-reference falls back to the top level')
+  assert.equal(isArchivedNode(selfRestored.nodes[0]), false)
+})
+
+test('a restore that would break the depth ceiling returns to the top level', () => {
+  let state = emptyMap()
+  let parentId = null
+  for (let level = 1; level <= MAX_DEPTH; level += 1) {
+    const created = createNode(state, { parentId, workspaceId: 'w1', title: `L${level}`, id: `l${level}` })
+    state = created.state
+    parentId = created.id
+  }
+  state = createNode(state, { parentId: null, workspaceId: 'w1', title: 'Block', id: 'block' }).state
+  state = createNode(state, { parentId: 'block', title: 'Block child', id: 'block-child' }).state
+  state = archiveNode(state, 'block')
+  state = {
+    ...state,
+    nodes: state.nodes.map(node => node.id === 'block' ? { ...node, archivedParentId: `l${MAX_DEPTH}` } : node),
+  }
+  const restored = unarchiveNode(state, 'block')
+  assert.equal(restored.nodes.find(node => node.id === 'block').parentId, null, '11 levels plus a two-node block breaks the ceiling')
+})
+
+test('only an archived block root can be restored', () => {
+  const state = archivedSeed()
+  assert.throws(
+    () => unarchiveNode(state, 'a'),
+    (error) => error instanceof MapError && error.code === 'NOT_ARCHIVED',
+  )
+  assert.throws(
+    () => unarchiveNode(state, 'a11'),
+    (error) => error instanceof MapError && error.code === 'NOT_ARCHIVED',
+    'a topic inside a block comes back with the block',
+  )
+  assert.throws(
+    () => unarchiveNode(state, 'ghost'),
+    (error) => error instanceof MapError && error.code === 'NOT_FOUND',
+  )
+})
+
+test('unarchiving a conversation clears only its mark', () => {
+  let state = seed()
+  state = syncThreads(state, [{ id: 's1', displayTitle: '会话一' }], null, new Map([['s1', 'w1']]))
+  state = assignThreads(state, ['s1'], 'a1')
+  state = archiveThread(state, 's1')
+  const restored = unarchiveThread(state, 's1')
+  assert.equal(isArchivedThread(threadOfSession(restored, 's1')), false)
+  assert.equal(threadOfSession(restored, 's1').nodeId, 'a1', 'the filing is untouched')
+  assert.throws(
+    () => unarchiveThread(restored, 's1'),
+    (error) => error instanceof MapError && error.code === 'NOT_ARCHIVED',
+  )
+  assert.throws(
+    () => unarchiveThread(state, 'ghost'),
+    (error) => error instanceof MapError && error.code === 'NO_THREAD',
+  )
+})
+
+test('the archive is a guard, not a drag destination', () => {
+  let state = seed()
+  state = syncThreads(state, [
+    { id: 'live', displayTitle: '活跃会话' },
+    { id: 'blocked', displayTitle: '块内会话' },
+    { id: 'own', displayTitle: '独立归档会话' },
+  ], null, new Map([['live', 'w1'], ['blocked', 'w1'], ['own', 'w1']]))
+  state = assignThreads(state, ['blocked'], 'a1')
+  state = archiveThread(state, 'own')
+  const block = archiveNode(state, 'a1')
+
+  assert.throws(
+    () => createNode(block, { parentId: 'a1', title: '归档里长出来的' }),
+    (error) => error instanceof MapError && error.code === 'ARCHIVED',
+    'the archive does not grow',
+  )
+  assert.deepEqual(moveNodeIssue(block, 'a1', null), {
+    code: 'ARCHIVED', message: 'The topic is archived; unarchive it first.',
+  })
+  assert.deepEqual(moveNodeIssue(block, 'a', 'a1'), {
+    code: 'ARCHIVED', message: 'The target topic is archived; unarchive it first.',
+  })
+  assert.throws(
+    () => moveNode(block, 'a1', null),
+    (error) => error instanceof MapError && error.code === 'ARCHIVED',
+    'moveNode throws exactly the issue it reported',
+  )
+  assert.throws(
+    () => insertNodeBefore(block, 'a', 'a1'),
+    (error) => error instanceof MapError && error.code === 'ARCHIVED',
+  )
+  assert.deepEqual(assignThreadIssue(block, 'own', 'a'), {
+    code: 'ARCHIVED', message: 'The conversation is archived; unarchive it first.',
+  })
+  assert.deepEqual(assignThreadIssue(block, 'blocked', 'a'), {
+    code: 'ARCHIVED', message: 'The conversation is archived; unarchive it first.',
+  }, 'a conversation inside a block carries no mark but is still archived')
+  assert.throws(
+    () => assignThreads(block, ['own'], 'a'),
+    (error) => error instanceof MapError && error.code === 'ARCHIVED',
+  )
+  assert.deepEqual(
+    threadMoveTargets(block, 'w1').map(target => target.nodeId),
+    [null, 'a'],
+    'archived topics are not picker destinations',
+  )
+  assert.equal(assignThreadIssue(block, 'own', 'a') !== null, true, 'the conversation rule is independent of the target')
+  assert.equal(assignThreadIssue(block, 'live', 'a'), null, 'an active conversation still files under an active topic')
+})
+
+test('the archive refuses a drop whose anchor is archived in a hand-built document', () => {
+  const state = createNode(seed(), { parentId: null, workspaceId: 'w1', title: '另一个主题', id: 'a2' }).state
+  // N1 makes this impossible through the model, but the parser accepts it.
+  const handBuilt = {
+    ...state,
+    nodes: state.nodes.map(node => node.id === 'a1'
+      ? { ...node, archivedAt: '2024-01-01T00:00:00.000Z' }
+      : node),
+  }
+  assert.throws(
+    () => insertNodeBefore(handBuilt, 'a2', 'a', 'a1'),
+    (error) => error instanceof MapError && error.code === 'ARCHIVED',
+  )
+})
+
+test('deleting an archived topic keeps its conversations in the archive', () => {
+  const state = archivedSeed()
+  const deleted = deleteNodeSubtree(state, 'a1')
+  assert.equal(deleted.nodes.some(node => node.id === 'a1' || node.id === 'a11'), false)
+  const thread = threadOfSession(deleted, 'blocked')
+  assert.equal(thread.nodeId, null, 'the filed topic is gone')
+  assert.equal(typeof thread.archivedAt, 'string', 'the conversation becomes an top-level archived one')
+  assert.deepEqual(archiveStatsOf(deleted, 'w1'), { nodes: 0, sessions: 2 })
+  assert.deepEqual(activeDirectThreadsOf(deleted, 'w1'), [], 'it does not fall back into the active tree')
+})
+
+test('deleting an active topic keeps an independently archived conversation archived', () => {
+  let state = seed()
+  state = createNode(state, { parentId: 'a1', title: '更深的子题', id: 'a11' }).state
+  state = syncThreads(state, [{ id: 'own', displayTitle: '独立归档会话' }], null, new Map([['own', 'w1']]))
+  state = assignThreads(state, ['own'], 'a11')
+  state = archiveThread(state, 'own')
+  const deleted = deleteNodeSubtree(state, 'a')
+  const thread = threadOfSession(deleted, 'own')
+  assert.equal(thread.nodeId, null, 'the filed topic is gone')
+  assert.equal(isArchivedThread(thread), true, 'the mark survives the deletion, so the conversation stays stored')
+})
+
+test('deleting an active topic never touches an archived block', () => {
+  let state = seed()
+  state = archiveNode(state, 'a1')
+  const deleted = deleteNodeSubtree(state, 'a')
+  assert.equal(inArchive(deleted, 'a1'), true, 'the detached archive survives the ancestor it came from')
+  assert.deepEqual(archiveStatsOf(deleted, 'w1'), { nodes: 1, sessions: 0 })
+})
+
+test('an archived conversation selects the archive path, not a row it is not under', () => {
+  let state = seed()
+  state = syncThreads(state, [
+    { id: 'loose', displayTitle: '独立归档会话' },
+    { id: 'blocked', displayTitle: '块内会话' },
+  ], null, new Map([['loose', 'w1'], ['blocked', 'w1']]))
+  state = assignThreads(state, ['blocked'], 'a1')
+  state = archiveThread(state, 'loose')
+  assert.equal(selectionOfThread(state, threadOfSession(state, 'loose')), '@archive:w1')
+  state = archiveNode(state, 'a1')
+  assert.equal(
+    selectionOfThread(state, threadOfSession(state, 'blocked')),
+    'a1',
+    'a conversation inside a block selects its topic; the archive row is drawn by ancestorRowKeys',
+  )
+  assert.deepEqual(homeOfSession(state, 'loose'), {
+    spaceId: state.defaultSpaceId,
+    selection: '@archive:w1',
+  })
+  // A hand-built document may archive a conversation but leave its topic active.
+  const handBuilt = {
+    ...state,
+    threads: state.threads.map(thread => thread.sessionId === 'blocked'
+      ? { ...thread, archivedAt: '2024-01-01T00:00:00.000Z' }
+      : thread),
+  }
+  assert.equal(selectionOfThread(handBuilt, threadOfSession(handBuilt, 'blocked')), 'a1', 'only a node inside the archive outranks the archive row')
+})
+
+test('ancestorRowKeys puts the archive row between the Workspace row and its content', () => {
+  let state = seed()
+  state = createNode(state, { parentId: 'a1', title: '更深的子题', id: 'a11' }).state
+  assert.deepEqual(ancestorRowKeys(state, 'a11'), ['a', 'a1', '@ws:w1'], 'active rows are unchanged')
+  state = archiveNode(state, 'a')
+  assert.deepEqual(ancestorRowKeys(state, 'a11'), ['a', 'a1', '@archive:w1', '@ws:w1'])
+  assert.deepEqual(ancestorRowKeys(state, 'a'), ['@archive:w1', '@ws:w1'])
+})
+
+test('archived marks survive a save and load round trip', () => {
+  const state = archivedSeed()
+  const parsed = parseMapState(JSON.stringify(state))
+  assert.deepEqual(parsed, state, 'the Host round trip keeps every mark')
+  const node = parsed.nodes.find(candidate => candidate.id === 'a1')
+  assert.equal(typeof node.archivedAt, 'string')
+  assert.equal(node.archivedParentId, 'a')
+  assert.equal(typeof threadOfSession(parsed, 'loose').archivedAt, 'string')
+  assert.equal(threadOfSession(parsed, 'blocked').archivedAt, undefined, 'the block conversation stays unmarked')
+
+  const backing = new Map()
+  const store = {
+    getItem: key => backing.get(key) ?? null,
+    setItem: (key, value) => { backing.set(key, value) },
+  }
+  saveMap(store, state)
+  assert.deepEqual(loadMap(store), state)
+})
+
+test('a hand-built document with unusable archive fields parses to a clean shape', () => {
+  const parsed = parseMapState(JSON.stringify({
+    version: 2,
+    revision: 1,
+    nodes: [
+      { id: 'z', parentId: null, title: 'Z', description: '', position: 1, updatedAt: '', archivedAt: '', archivedParentId: 12 },
+      { id: 'y', parentId: null, title: 'Y', description: '', position: 2, updatedAt: '', archivedAt: '2024-01-01T00:00:00.000Z', archivedParentId: null },
+    ],
+    threads: [
+      { sessionId: 's', nodeId: null, title: 'S', updatedAt: '', importedAt: '', archivedAt: '' },
+    ],
+    spaces: [], defaultSpaceId: '', spaceOf: {}, subagentSessionIds: [],
+  }))
+  assert.equal(parsed.nodes[0].archivedAt, undefined, 'a blank mark is not an archive')
+  assert.equal(parsed.nodes[0].archivedParentId, undefined)
+  assert.equal(parsed.nodes[1].archivedParentId, null, 'a Workspace-root archive keeps its explicit null')
+  assert.equal(parsed.threads[0].archivedAt, undefined)
+})
+
+test('reconciliation releases archived content whose Workspace is gone', () => {
+  let state = seed()
+  state = archiveNode(state, 'a1')
+  const released = reconcileWorkspaces(state, [workspace('w2', 'beta')])
+  const root = released.nodes.find(node => node.id === 'a')
+  const block = released.nodes.find(node => node.id === 'a1')
+  assert.equal(root.workspaceId, null, 'the tree falls to the ungrouped bucket with the Workspace')
+  assert.equal(block.workspaceId, null)
+  assert.equal(block.parentId, 'a', 'the remembered parent is restored')
+  assert.equal(block.archivedAt, undefined, 'no archive row is left to file it under')
+  assert.equal(block.archivedParentId, undefined)
+  assert.equal(released.revision, state.revision + 1)
+})
+
+test('released archived topics fall back to the top level when their parent is gone', () => {
+  let state = seed()
+  state = archiveNode(state, 'a1')
+  state = deleteNodeSubtree(state, 'a')
+  const released = reconcileWorkspaces(state, [])
+  assert.equal(released.nodes.find(node => node.id === 'a1').parentId, null)
+  assert.equal(released.nodes.find(node => node.id === 'a1').archivedAt, undefined)
+})
+
+test('released archived topics re-form their chain, and a recorded cycle is broken', () => {
+  let state = seed()
+  state = archiveNode(state, 'a1')
+  state = archiveNode(state, 'a')
+  const released = reconcileWorkspaces(state, [])
+  assert.equal(released.nodes.find(node => node.id === 'a').parentId, null)
+  assert.equal(released.nodes.find(node => node.id === 'a1').parentId, 'a', 'both released roots re-form their hierarchy')
+
+  const archivedNode = (id, position, archivedParentId) => ({
+    id, parentId: null, workspaceId: 'w-gone', title: id.toUpperCase(), description: '', position,
+    updatedAt: '', archivedAt: '2024-01-01T00:00:00.000Z', archivedParentId,
+  })
+  const broken = reconcileWorkspaces({
+    ...ensureDefaultSpace(emptyMap()),
+    // A two-node loop, and a chain that only runs into one.
+    nodes: [
+      archivedNode('x', 1, 'y'),
+      archivedNode('y', 2, 'x'),
+      archivedNode('z', 3, 'y'),
+      archivedNode('w', 4, 'z'),
+    ],
+    threads: [],
+  }, [])
+  assert.equal(broken.nodes.some(node => node.archivedAt !== undefined), false, 'every released mark is cleared')
+  const byId = new Map(broken.nodes.map(node => [node.id, node]))
+  for (const node of broken.nodes) {
+    const seen = new Set([node.id])
+    let cursor = node.parentId
+    while (cursor !== null) {
+      assert.equal(seen.has(cursor), false, `${node.id} does not sit in a rebuilt cycle`)
+      seen.add(cursor)
+      cursor = byId.get(cursor)?.parentId ?? null
+    }
+  }
+  assert.equal(broken.nodes.filter(node => node.parentId !== null).length >= 2, true, 'the non-cyclic parent links are kept')
+})
+
+test('reconciliation keeps archived content while its Workspace exists', () => {
+  let state = seed()
+  state = archiveNode(state, 'a1')
+  const kept = reconcileWorkspaces(state, [workspace('w1', 'alpha'), workspace('w2', 'beta')])
+  assert.equal(isArchivedNode(kept.nodes.find(node => node.id === 'a1')), true)
+  assert.equal(kept.nodes.find(node => node.id === 'a1').parentId, null)
+  assert.equal(
+    reconcileWorkspaces(kept, [workspace('w1', 'alpha'), workspace('w2', 'beta')]),
+    kept,
+    'reconciliation stays identity-stable when nothing has to change',
+  )
+})
+
+test('reconciliation releases a conversation whose recorded Workspace is gone', () => {
+  // A document read from a previous build may carry an owner the Host no longer
+  // reports; building it directly is the only way to reproduce that state.
+  const state = {
+    ...ensureDefaultSpace(emptyMap()),
+    threads: [
+      { sessionId: 'stale', nodeId: null, title: '旧会话', updatedAt: '', importedAt: '', workspaceId: 'w-gone', archivedAt: '2024-01-01T00:00:00.000Z' },
+    ],
+  }
+  const released = reconcileWorkspaces(state, [workspace('w2', '产品设计')])
+  assert.equal(threadOfSession(released, 'stale').workspaceId, null, 'a stale owner would hide the row under a missing group')
+  assert.equal(isArchivedThread(threadOfSession(released, 'stale')), false, 'and the archive mark goes with it')
+
+  const claimed = reconcileWorkspaces(state, [workspace('w2', '产品设计', ['stale'])])
+  assert.equal(threadOfSession(claimed, 'stale').workspaceId, 'w2', 'Host membership still wins')
+  assert.equal(isArchivedThread(threadOfSession(claimed, 'stale')), true, 'the archive row of a live Workspace still holds it')
 })

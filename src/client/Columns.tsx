@@ -10,14 +10,23 @@
  * leading geometry, so their titles line up.
  *
  * Columns scroll vertically on their own; horizontal scrolling belongs to the
- * node area that holds them.
+ * node area that holds them. A column may also pin one footer row (the archive
+ * door) under its scroller, so that row stays reachable however long the list
+ * grows.
+ *
+ * A row holds its title on one ellipsized line, and hovering narrows that line
+ * again (the row's actions surface in the trailing slot). `RowTitleTip` restores
+ * the full title as a hover bubble when — and only when — the label really
+ * clips; see `row-tip.tsx`.
  */
 import { useRef, type CSSProperties, type PointerEvent, type ReactNode } from 'react'
 
+import type { Translate } from '../shared/copy.js'
 import { clampColumnWidth } from '../shared/view-state.js'
 import type { StatusRollup } from '../shared/status-rollup.js'
 import { useT } from './locale.js'
 import type { DragPayload } from './row-drag.js'
+import { RowTitleTip } from './row-tip.js'
 import { StatusRollupBadge } from './StatusRollup.js'
 
 /** One status mark, drawn exactly as the application's own rows draw it. */
@@ -56,6 +65,23 @@ export interface ThreadRow {
    * `undefined` and keep their single 32px line.
    */
   note?: ReactNode
+  /**
+   * Whether the conversation sits in the archive.
+   *
+   * An archived conversation is still readable, openable and live — this plugin's
+   * archive folds rows away, it does not freeze sessions — but it takes no part
+   * in a drag: the menu's archive/unarchive action is the only way in or out, so
+   * a drop can neither file something away nor pull it back out. The row states
+   * it with `data-archived` for the hit test.
+   */
+  archived?: boolean
+  /**
+   * Whether the trailing `⋯` menu is offered. Defaults to true.
+   *
+   * A conversation inside an archived topic is restored with that whole block,
+   * so it has no action of its own: the row stays openable but drops the menu.
+   */
+  menu?: boolean
 }
 
 /** One node row, with the conversations that belong to it nested beneath. */
@@ -64,10 +90,12 @@ export interface NodeRow {
   title: string
   /**
    * What this row is. The first level lists Workspaces (and each space's
-   * ungrouped bucket); every deeper level lists this plugin's topic nodes. A
-   * `hint` row is a non-interactive placeholder (an empty space).
+   * ungrouped bucket); every deeper level lists this plugin's topic nodes. An
+   * `archive` row is the Workspace's synthetic 「已归档」 door — a system row,
+   * not a topic — and a `hint` row is a non-interactive placeholder (an empty
+   * space).
    */
-  kind: 'workspace' | 'ungrouped' | 'node' | 'hint'
+  kind: 'workspace' | 'ungrouped' | 'node' | 'hint' | 'archive'
   /**
    * The Workspace this row belongs to, normalised; `null` for the ungrouped
    * bucket and for a legacy rootless topic. It is what the row reports as its
@@ -112,6 +140,48 @@ export interface NodeRow {
    * node's home path or a description snippet with the query highlighted.
    */
   note?: ReactNode
+  /**
+   * Whether the row is inside the archive: an archived topic, or one of its
+   * descendants (the rows of the archive column).
+   *
+   * An archived row keeps every reading affordance (it selects, folds, opens its
+   * conversations) but offers no start action and is neither a drag source nor a
+   * drop target: items enter and leave the archive only through the menu, so no
+   * gesture can silently file something away or pull it back out. The group
+   * states it with `data-group-archived` for the hit test.
+   */
+  archived?: boolean
+  /**
+   * Whether the row offers the start-a-conversation action. Defaults to true.
+   *
+   * A row can keep its menu and still refuse to grow: an archived topic can be
+   * renamed, restored or deleted, but new work belongs in the active tree.
+   */
+  start?: boolean
+  /**
+   * Tooltip for the trailing number.
+   *
+   * The archive row counts conversations, so its bare number would otherwise
+   * read as a child-topic count.
+   */
+  countTitle?: string
+  /**
+   * Whether the archive row is empty (no archived topics and no conversations).
+   *
+   * An empty archive says how it fills up; a non-empty one says what the row is.
+   * The flag is explicit because the row's number counts conversations: a topic
+   * put away without any conversation is still content, and must not read as an
+   * empty archive.
+   */
+  empty?: boolean
+  /**
+   * One live mark the row shows in its trailing slot, ahead of the count.
+   *
+   * The archive row is the only user: work hidden behind the archive door still
+   * has to be visible from the active tree. The archive reports nothing else —
+   * its completed work is exactly what the reader chose to put away.
+   */
+  activity?: { kind: 'running' | 'attention'; label: string }
 }
 
 /** One column: a level of nodes, with a label that never changes. */
@@ -121,6 +191,15 @@ export interface NodeColumn {
   rows: NodeRow[]
   /** Buttons belonging to the column itself. */
   headerActions?: ReactNode
+  /**
+   * A row pinned under the scrolling rows, at the column's own bottom edge.
+   *
+   * The archive row is the footer: it must stay reachable however long the topic
+   * list grows. It is rendered outside `.cm-col-scroll` on purpose — the drag hit
+   * test measures drop targets through that scroller, so a pinned strip cannot be
+   * mistaken for the column's blank tail.
+   */
+  footerRow?: NodeRow
 }
 
 /** Where a row's "more" menu should open, in viewport coordinates. */
@@ -132,50 +211,73 @@ export interface MenuRequest {
 }
 
 /**
- * How a release over one row would go; drives that row's `data-drop`.
+ * How a release over one group would go; drives that group's `data-drop-group`.
  *
- * `held` is U3's hysteresis: the pointer left every row (a gutter, a column's
+ * `held` is U3's hysteresis: the pointer left every group (a gutter, a column's
  * blank edge, outside the band) but the last candidate is still what the reader
- * is aiming at, so the row keeps its mark instead of going dark. A release there
- * still writes nothing.
+ * is aiming at, so the group keeps its mark instead of going dark. A release
+ * there still writes nothing.
  */
 export type DropState = 'valid' | 'invalid' | 'noop' | 'held' | 'none'
 
-/** Which edge of a row an insertion line is drawn on. */
+/** Which edge of a group an insertion line is drawn on. */
 export type InsertEdge = 'before' | 'after'
 
 /**
- * The inline mark one row wears while a drag is in flight.
+ * The inline mark a dragged conversation row wears while a drag is in flight.
  *
  * Inline on purpose: the plugin's sheet is shared with a concurrent editor, so
- * the gesture's visuals travel with the element that draws them. A legal target
- * is tinted and ringed, a refused one only says so with the cursor — the
- * refusal's wording belongs to the pointer's label, and greying a whole row
- * would read as "this row is gone" rather than "this drop is refused".
- * @param tone - how a release here would go; `none` marks nothing.
+ * the gesture's visuals travel with the element that draws them. Only a
+ * conversation dims one row; a topic dims its group (see {@link groupDragStyle}).
  * @param dragging - whether this row is the one being dragged.
  * @returns the row's inline style, or undefined when it wears nothing.
  */
-function rowDragStyle(tone: DropState, dragging: boolean): CSSProperties | undefined {
+function dragSourceStyle(dragging: boolean): CSSProperties | undefined {
+  return dragging ? { opacity: 0.45 } : undefined
+}
+
+/**
+ * The inline mark one drop group wears while a drag is in flight.
+ *
+ * A group is the target now, so the mark is one card over the header and every
+ * row it owns. `into` (and a workspace target) paints the full "this whole block
+ * is where it lands" card; a `before`/`after` reorder keeps a much lighter card
+ * and lets the group-boundary insertion line carry the intent. `noop`/`held`
+ * stay dashed; an `invalid` group is not painted at all — the pointer label owns
+ * the refusal wording and the cursor says `no-drop`.
+ * @param tone - how a release on this group would go.
+ * @param mode - the insertion intent, when the target is a topic.
+ * @param dragging - whether this group is the one being dragged.
+ * @returns the group's inline style, or undefined when it wears nothing.
+ */
+function groupDragStyle(
+  tone: DropState,
+  mode: 'into' | 'before' | 'after' | null,
+  dragging: boolean,
+): CSSProperties | undefined {
   const style: CSSProperties = {}
   if (dragging) style.opacity = 0.45
-  if (tone === 'valid' || tone === 'noop' || tone === 'held') {
-    const tint = tone === 'valid' ? 12 : 6
-    style.background = `color-mix(in srgb, var(--dsw-alias-brand-primary, currentColor) ${String(tint)}%, transparent)`
-    // Held says "still your last candidate, but nothing is under the pointer",
-    // so the same mark is drawn as a hint rather than as a live target.
-    style.outline = tone === 'held'
-      ? '1px dashed color-mix(in srgb, var(--dsw-alias-brand-primary, currentColor) 45%, transparent)'
-      : '1px solid color-mix(in srgb, var(--dsw-alias-brand-primary, currentColor) 45%, transparent)'
+  if (tone === 'valid') {
+    const reorder = mode === 'before' || mode === 'after'
+    style.background = `color-mix(in srgb, var(--dsw-alias-brand-primary, currentColor) ${reorder ? '4' : '7'}%, transparent)`
+    if (!reorder) {
+      style.boxShadow = 'inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-brand-primary, currentColor) 32%, transparent)'
+    }
+  } else if (tone === 'noop') {
+    style.background = 'color-mix(in srgb, var(--dsw-alias-brand-primary, currentColor) 6%, transparent)'
+    style.outline = '1px dashed color-mix(in srgb, var(--dsw-alias-brand-primary, currentColor) 32%, transparent)'
     style.outlineOffset = -1
-  } else if (tone === 'invalid') {
-    style.cursor = 'no-drop'
+  } else if (tone === 'held') {
+    style.background = 'color-mix(in srgb, var(--dsw-alias-brand-primary, currentColor) 5%, transparent)'
+    style.outline = '1px dashed color-mix(in srgb, var(--dsw-alias-brand-primary, currentColor) 32%, transparent)'
+    style.outlineOffset = -1
+    style.opacity = 0.8
   }
   return Object.keys(style).length === 0 ? undefined : style
 }
 
 /**
- * The 2px insertion line a topic drop draws on a row's edge.
+ * The 2px insertion line a topic drop draws on a group's boundary.
  *
  * Inline on purpose: the plugin's sheet is shared with a concurrent editor, so
  * the drag's own visuals travel with the element that draws them. The theme
@@ -208,13 +310,45 @@ export interface NodeColumnViewProps {
    */
   ancestorKeys?: ReadonlySet<string>
   /**
+   * The open conversation's home path: the home row and every container above
+   * it.
+   *
+   * The row carries it as `data-session-path`. The sheet states the chain with
+   * the filled brand folder and the bold title — always visible, so the reader
+   * keeps knowing which branch the open conversation lives under even after the
+   * selection moved elsewhere. The attribute is written for every chain row,
+   * including a row that is also the current selection: the chain style wins
+   * there (the owner's rule), and the selected row only gets the inset border
+   * when it is *not* on the chain. The old second grey lane and the icon-only
+   * path ink are gone; the composer's context bar names the chain in words.
+   */
+  sessionPathKeys?: ReadonlySet<string>
+  /**
    * The row the search view's keyboard cursor is on (a node id or session id).
    *
    * The column draws one quiet active mark on that row; no other row ever
    * carries it, and ordinary columns pass `null`.
    */
   activeRowKey?: string | null
+  /**
+   * The conversation the tree marks as being read.
+   *
+   * It is the open one, except while a subagent child is open: the map gives the
+   * child no row of its own, so the panel passes the child's nearest visible
+   * ancestor (`readingSessionOf`) and reading a subagent draws the parent's row
+   * exactly as reading the parent would. That row is the column's only solid
+   * surface and carries `aria-current="page"`; no other row has either.
+   */
   openSessionId: string | null
+  /**
+   * The row the open conversation is filed under, when the map knows it.
+   *
+   * It is drawn in the icon channel — a filled folder, not a surface and not
+   * either selection mark: the reader can see where the conversation they are
+   * reading lives even after the selection has moved to another branch, and the
+   * filled folder never claims to be the selected row.
+   */
+  homeRowKey?: string | null
   /** The row whose menu is open, which pins that row's affordances. */
   menuRowId: string | null
   onSelectNode: (nodeId: string) => void
@@ -232,14 +366,41 @@ export interface NodeColumnViewProps {
    * second, document-side check.
    */
   onRowPointerDown?: (payload: DragPayload, event: PointerEvent<HTMLDivElement>) => void
-  /** The row being dragged, by row key: a node id or a session id. */
+  /**
+   * The conversation row being dragged, by session id.
+   *
+   * Only conversations dim a single row: a topic drag dims its whole group
+   * (`draggingGroupKey`), because the conversations filed under it travel with
+   * it and the group is what moves.
+   */
   draggingKey?: string | null
-  /** The row under the pointer. */
-  dropKey?: string | null
-  /** How a release on `dropKey` would go; every other row reads `none`. */
-  dropState?: DropState
-  /** The insertion line to draw inside the row named by `dropKey`. */
+  /** The group being dragged (a topic drag), by group key. */
+  draggingGroupKey?: string | null
+  /** The group under the pointer; every other group reads `none`. */
+  dropGroupKey?: string | null
+  /** How a release on `dropGroupKey` would go. */
+  dropGroupState?: DropState
+  /** The insertion intent the group under the pointer carries, if any. */
+  dropGroupMode?: 'into' | 'before' | 'after' | null
+  /** The group-boundary line to draw, when a release would insert at one. */
   insertEdge?: InsertEdge | null
+}
+
+/**
+ * The group key a row answers to.
+ *
+ * Stable across collapse/expand and column rebuilds, so the measured rect and
+ * the DOM mark cannot drift: topics key on their id, Workspaces on their id,
+ * the archive row on its selection key, and the ungrouped bucket on its row key
+ * (the row already names the space).
+ * @param row - the rendered row.
+ * @returns the key the hit test and the Mark use.
+ */
+function groupKeyOf(row: NodeRow): string {
+  if (row.kind === 'node') return `node:${row.id}`
+  if (row.kind === 'workspace') return `workspace:${row.workspaceId ?? ''}`
+  if (row.kind === 'archive') return `archive:${row.id}`
+  return `ungrouped:${row.id}`
 }
 
 /** Folder glyph marking a node. */
@@ -247,6 +408,22 @@ function NodeGlyph(): ReactNode {
   return (
     <svg className="cm-row-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.2} aria-hidden="true">
       <path d="M1.6 4.3c0-.6.5-1.1 1.1-1.1h2.9l1.3 1.6h6.4c.6 0 1.1.5 1.1 1.1v6.1c0 .6-.5 1.1-1.1 1.1H2.7c-.6 0-1.1-.5-1.1-1.1z" />
+    </svg>
+  )
+}
+
+/**
+ * Storage-box glyph marking the 「已归档」 door.
+ *
+ * It is deliberately not a folder: an archived topic is still a folder, while
+ * this row is the room they were put away in.
+ */
+function ArchiveGlyph(): ReactNode {
+  return (
+    <svg className="cm-row-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.2} aria-hidden="true">
+      <path d="M1.9 3.1h12.2v3.1H1.9z" />
+      <path d="M2.9 6.2v6.1c0 .7.6 1.2 1.2 1.2h7.8c.7 0 1.2-.6 1.2-1.2V6.2" />
+      <path d="M6.2 8.7h3.6" />
     </svg>
   )
 }
@@ -354,6 +531,289 @@ export function showsStatusRollup(rollup: StatusRollup | undefined): boolean {
   return rollup !== undefined && rollup.total > 0
 }
 
+/** Everything one row group needs from the column that draws it. */
+interface RowGroupContext {
+  /** The column key the group reports to the drag hit test. */
+  columnKey: string
+  /** The active translator, read once by the column. */
+  t: Translate
+  /** Whether a status rollup keeps its counts or draws dots only. */
+  rollupDensity: 'dots' | 'cluster'
+  /** The column's own props: selection marks, callbacks and drag state. */
+  props: NodeColumnViewProps
+}
+
+/**
+ * Render one row group: its header row (a topic, a Workspace, the ungrouped
+ * bucket, or the archive door) plus the conversations nested under it.
+ *
+ * Extracted from the column loop so the pinned footer row
+ * ({@link NodeColumn.footerRow}) is drawn by exactly the same code as a
+ * scrolling row: the archive row has to select, answer the keyboard and wear the
+ * same trailing count as any other row, and one renderer keeps the two paths
+ * from drifting apart. A `hint` row stays a plain placeholder with no group
+ * marks.
+ * @param props - the row to draw and the context of the column drawing it.
+ * @returns the group element.
+ */
+function NodeGroup({ row, context }: { row: NodeRow; context: RowGroupContext }): ReactNode {
+  const { columnKey, t, rollupDensity, props } = context
+  if (row.kind === 'hint') return <div className="cm-hint-row">{row.title}</div>
+  const archive = row.kind === 'archive'
+  // The group, not the row, is the target: every row of this block reports the
+  // same key, so a pointer anywhere inside gets the same mark. The insertion
+  // line is the only per-edge mark left, and it is drawn on the group's own
+  // boundary.
+  const groupKey = groupKeyOf(row)
+  const dropState: DropState = props.dropGroupKey === groupKey ? props.dropGroupState ?? 'none' : 'none'
+  const dropMode = props.dropGroupKey === groupKey ? props.dropGroupMode ?? null : null
+  const insertEdge = props.dropGroupKey === groupKey ? props.insertEdge ?? null : null
+  const groupStyle = groupDragStyle(dropState, dropMode, props.draggingGroupKey === groupKey)
+  // The archive row reports one activity mark and a conversation count, never a
+  // status rollup: done work behind the door must not keep nagging.
+  const showStatus = !archive && showsStatusRollup(row.rollup)
+  // Only a selectable, active topic drags: a Workspace row is not a payload, the
+  // ungrouped bucket takes no part in a drag at all, the search result group
+  // heading is a heading (its synthetic id must never become a drop target), and
+  // an archived row may leave the archive only through its menu.
+  const payload: DragPayload | null = row.kind === 'node'
+    && row.selectable !== false
+    && row.archived !== true
+    && props.onRowPointerDown !== undefined
+    ? { kind: 'node', nodeId: row.id, workspaceId: row.workspaceId ?? null }
+    : null
+  // The archive row's native tooltip answers two different questions: an empty
+  // archive says how it fills up, a non-empty one says what the row is. Every
+  // ordinary row stays native-title-free on purpose: its clipped title is
+  // revealed by RowTitleTip, and the browser's own delayed bubble over the same
+  // words would read as a second, redundant tip.
+  const rowTitle = archive
+    ? row.empty === true ? t('panel.archive.emptyHint') : t('panel.archive.rowTitle')
+    : undefined
+  return (
+    <div
+      className="cm-node-group"
+      data-group-key={groupKey}
+      data-group-kind={row.kind}
+      data-group-column-key={columnKey}
+      data-group-node-id={row.kind === 'node' ? row.id : undefined}
+      data-group-workspace-id={row.workspaceId ?? ''}
+      data-group-collapsed={row.collapsed ? 'true' : 'false'}
+      data-group-archived={row.archived === true ? 'true' : undefined}
+      data-dragging-group={props.draggingGroupKey === groupKey ? 'true' : 'false'}
+      data-drop-group={dropState}
+      data-drop-mode={dropMode ?? undefined}
+      style={groupStyle}
+    >
+      <RowTitleTip text={row.title}>
+        <div
+          className="cm-node-row"
+          data-kind={row.kind}
+          data-node-id={row.kind === 'node' ? row.id : undefined}
+          data-node-workspace-id={row.kind === 'node' ? row.workspaceId ?? '' : undefined}
+          data-row-key={row.kind === 'workspace' || row.kind === 'ungrouped' || row.kind === 'archive'
+            ? row.id
+            : undefined}
+          data-selected={row.selectable !== false && row.id === props.selectedNodeId}
+          data-session-home={row.selectable !== false && row.id === props.homeRowKey ? 'true' : undefined}
+          aria-description={row.selectable !== false && row.id === props.homeRowKey
+            ? t('home.anchor.label')
+            : undefined}
+          data-note={row.note === undefined ? undefined : 'true'}
+          data-search-active={props.activeRowKey !== undefined && row.id === props.activeRowKey ? 'true' : undefined}
+          data-path-selected={row.selectable !== false
+            && row.id !== props.selectedNodeId
+            && props.ancestorKeys?.has(row.id) === true}
+          data-session-path={row.selectable !== false
+            && props.sessionPathKeys?.has(row.id) === true
+            ? 'true'
+            : undefined}
+          data-collapsed={row.collapsed}
+          data-menu={row.id === props.menuRowId}
+          data-selectable={row.selectable !== false}
+          role={row.selectable === false ? undefined : 'button'}
+          tabIndex={row.selectable === false ? undefined : 0}
+          title={rowTitle}
+          onPointerDown={payload === null ? undefined : (event) => { props.onRowPointerDown?.(payload, event) }}
+          onClick={row.selectable === false ? undefined : () => { props.onSelectNode(row.id) }}
+          onKeyDown={row.selectable === false
+            ? undefined
+            : (event) => { if (event.key === 'Enter') props.onSelectNode(row.id) }}
+        >
+          <span className="cm-slot">
+            {archive
+              ? <ArchiveGlyph />
+              : row.threads.length === 0
+                ? <NodeGlyph />
+                : (
+                  <>
+                    <span className="cm-folder"><NodeGlyph /></span>
+                    <button
+                      type="button"
+                      className="cm-icon-btn cm-chevron"
+                      data-open={!row.collapsed}
+                      aria-expanded={!row.collapsed}
+                      aria-label={row.collapsed ? t('columns.expandThreads') : t('columns.collapseThreads')}
+                      onClick={(event) => { event.stopPropagation(); props.onToggleNode(row.id) }}
+                    >
+                      <FoldGlyph />
+                    </button>
+                  </>
+                )}
+          </span>
+          <span className="cm-row-labels">
+            <span className="cm-row-label">{row.title}</span>
+            {row.note !== undefined && <span className="cm-row-note">{row.note}</span>}
+          </span>
+          {archive
+            ? (
+              <>
+                {row.activity !== undefined && (row.activity.kind === 'running'
+                  ? (
+                    // The ring is aria-hidden, so its wrapper carries the wording.
+                    <span
+                      className="cm-row-activity"
+                      title={row.activity.label}
+                      role="img"
+                      aria-label={row.activity.label}
+                    >
+                      <RunningRing />
+                    </span>
+                  )
+                  : <StatusDot state="warning" label={row.activity.label} />)}
+                {row.childCount > 0 && (
+                  <span
+                    className="cm-child-count"
+                    title={row.countTitle ?? t('columns.childCount', { n: row.childCount })}
+                  >
+                    {row.childCount}
+                  </span>
+                )}
+              </>
+            )
+            : (
+              <>
+                {row.childCount > 0 && !showStatus && (
+                  <span className="cm-child-count" title={t('columns.childCount', { n: row.childCount })}>{row.childCount}</span>
+                )}
+                <StatusRollupBadge rollup={row.rollup} density={rollupDensity} />
+              </>
+            )}
+          {row.tools && !archive && (row.start !== false || row.menu !== false) && (
+            <span className="cm-row-actions">
+              {row.start !== false && (
+                <button
+                  type="button"
+                  className="cm-icon-btn"
+                  title={row.kind === 'node'
+                    ? t('columns.newThreadInNode')
+                    : row.kind === 'ungrouped' ? t('columns.newThreadInUngrouped') : t('columns.newThreadInWorkspace')}
+                  aria-label={t('common.startConversation')}
+                  onClick={(event) => { event.stopPropagation(); props.onNewThread(row.id) }}
+                >
+                  <NewThreadGlyph />
+                </button>
+              )}
+              {row.menu !== false && (
+                <button
+                  type="button"
+                  className="cm-icon-btn"
+                  title={t('common.more')}
+                  aria-label={t('common.more')}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    const rect = event.currentTarget.getBoundingClientRect()
+                    props.onMenu({ kind: row.kind === 'node' ? 'node' : 'workspace', id: row.id, x: rect.left, y: rect.bottom })
+                  }}
+                >
+                  <EllipsisGlyph />
+                </button>
+              )}
+            </span>
+          )}
+        </div>
+      </RowTitleTip>
+
+      {!row.collapsed && row.threads.map(thread => {
+        const threadSource = props.draggingKey === thread.sessionId
+        return (
+          <RowTitleTip key={thread.sessionId} text={thread.title}>
+            <div
+              className="cm-thread-row"
+              data-session-id={thread.sessionId}
+              data-parent-node-id={row.kind === 'node' ? row.id : undefined}
+              // The parent Workspace is the topic's, not only the Workspace row's:
+              // a conversation row is a drop target for its topic, and the hit test
+              // needs the topic's Workspace to judge a cross-Workspace drop (F0:
+              // this attribute used to be written for Workspace-level rows only,
+              // which made the whole conversation area under a topic resolve to
+              // `null`).
+              data-parent-workspace-id={row.kind === 'node' || row.kind === 'workspace'
+                ? row.workspaceId ?? ''
+                : undefined}
+              data-selected={thread.sessionId === props.openSessionId}
+              data-note={thread.note === undefined ? undefined : 'true'}
+              data-search-active={props.activeRowKey !== undefined && thread.sessionId === props.activeRowKey ? 'true' : undefined}
+              data-menu={thread.sessionId === props.menuRowId}
+              data-archived={thread.archived === true ? 'true' : undefined}
+              data-dragging={threadSource ? 'true' : 'false'}
+              style={dragSourceStyle(threadSource)}
+              aria-current={thread.sessionId === props.openSessionId ? 'page' : undefined}
+              role="button"
+              tabIndex={0}
+              onPointerDown={props.onRowPointerDown === undefined || thread.archived === true
+                ? undefined
+                : (event) => {
+                  props.onRowPointerDown?.(
+                    { kind: 'session', sessionId: thread.sessionId, workspaceId: thread.workspaceId ?? null },
+                    event,
+                  )
+                }}
+              onClick={() => { props.onOpenThread(thread.sessionId) }}
+              onKeyDown={(event) => { if (event.key === 'Enter') props.onOpenThread(thread.sessionId) }}
+            >
+              <span className="cm-slot">
+                {thread.status !== undefined && (thread.status.state === 'ongoing'
+                  ? <RunningRing />
+                  : <StatusDot state={thread.status.state} label={thread.status.label} />)}
+              </span>
+              <span className="cm-row-labels">
+                <span className="cm-row-label">{thread.title}</span>
+                {thread.note !== undefined && <span className="cm-row-note">{thread.note}</span>}
+              </span>
+              {thread.status !== undefined && thread.status.compact !== ''
+                ? <span className="cm-compact">{thread.status.compact}</span>
+                : thread.time !== '' && <span className="cm-time">{thread.time}</span>}
+              {thread.menu !== false && (
+                <span className="cm-row-actions">
+                  <button
+                    type="button"
+                    className="cm-icon-btn"
+                    title={t('common.more')}
+                    aria-label={t('common.more')}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      const rect = event.currentTarget.getBoundingClientRect()
+                      props.onMenu({ kind: 'thread', id: thread.sessionId, x: rect.left, y: rect.bottom })
+                    }}
+                  >
+                    <EllipsisGlyph />
+                  </button>
+                </span>
+              )}
+            </div>
+          </RowTitleTip>
+        )
+      })}
+
+      {!row.collapsed && row.threadFooter}
+      {insertEdge !== null && (
+        <span data-insert={insertEdge} style={insertionLineStyle(insertEdge)} aria-hidden="true" />
+      )}
+    </div>
+  )
+}
+
 /**
  * Render one level.
  * @param props - the column, its width, and the callbacks its rows use.
@@ -363,190 +823,21 @@ export function NodeColumnView(props: NodeColumnViewProps): ReactNode {
   const { column, width } = props
   const t = useT()
   const rollupDensity = width < ROLLUP_DOTS_WIDTH ? 'dots' : 'cluster'
+  const context: RowGroupContext = { columnKey: column.key, t, rollupDensity, props }
   return (
-    <div className="cm-node-col" style={{ width }}>
+    <div className="cm-node-col" data-col-key={column.key} style={{ width }}>
       <div className="cm-col-head">
         <span className="cm-col-title" title={column.title}>{column.title}</span>
         {column.headerActions !== undefined && <span className="cm-col-actions">{column.headerActions}</span>}
       </div>
       <div className="cm-col-scroll">
-        {column.rows.map(row => {
-          if (row.kind === 'hint') return <div key={row.id} className="cm-hint-row">{row.title}</div>
-          const dropState: DropState = props.dropKey === row.id ? props.dropState ?? 'none' : 'none'
-          const insertEdge = props.dropKey === row.id ? props.insertEdge ?? null : null
-          const showStatus = showsStatusRollup(row.rollup)
-          const rowStyle = {
-            ...rowDragStyle(dropState, props.draggingKey === row.id),
-            ...insertEdge === null ? {} : { position: 'relative' as const },
-          }
-          // Only a selectable topic row drags: a Workspace row is not a payload,
-          // the ungrouped bucket takes no part in a drag at all, and the search
-          // result group heading is a heading (its synthetic id must never
-          // become a drop target).
-          const payload: DragPayload | null = row.kind === 'node'
-            && row.selectable !== false
-            && props.onRowPointerDown !== undefined
-            ? { kind: 'node', nodeId: row.id, workspaceId: row.workspaceId ?? null }
-            : null
-          return (
-            <div key={row.id}>
-              <div
-                className="cm-node-row"
-                data-kind={row.kind}
-                data-node-id={row.kind === 'node' ? row.id : undefined}
-                data-node-workspace-id={row.kind === 'node' ? row.workspaceId ?? '' : undefined}
-                data-row-key={row.kind === 'workspace' || row.kind === 'ungrouped' ? row.id : undefined}
-                data-selected={row.selectable !== false && row.id === props.selectedNodeId}
-                data-note={row.note === undefined ? undefined : 'true'}
-                data-search-active={props.activeRowKey !== undefined && row.id === props.activeRowKey ? 'true' : undefined}
-                data-path-selected={row.selectable !== false
-                  && row.id !== props.selectedNodeId
-                  && props.ancestorKeys?.has(row.id) === true}
-                data-collapsed={row.collapsed}
-                data-menu={row.id === props.menuRowId}
-                data-selectable={row.selectable !== false}
-                data-dragging={props.draggingKey === row.id ? 'true' : 'false'}
-                data-drop={dropState}
-                style={Object.keys(rowStyle).length === 0 ? undefined : rowStyle}
-                role={row.selectable === false ? undefined : 'button'}
-                tabIndex={row.selectable === false ? undefined : 0}
-                title={row.title}
-                onPointerDown={payload === null ? undefined : (event) => { props.onRowPointerDown?.(payload, event) }}
-                onClick={row.selectable === false ? undefined : () => { props.onSelectNode(row.id) }}
-                onKeyDown={row.selectable === false
-                  ? undefined
-                  : (event) => { if (event.key === 'Enter') props.onSelectNode(row.id) }}
-              >
-                <span className="cm-slot">
-                  {row.threads.length === 0
-                    ? <NodeGlyph />
-                    : (
-                      <>
-                        <span className="cm-folder"><NodeGlyph /></span>
-                        <button
-                          type="button"
-                          className="cm-icon-btn cm-chevron"
-                          data-open={!row.collapsed}
-                          aria-expanded={!row.collapsed}
-                          aria-label={row.collapsed ? t('columns.expandThreads') : t('columns.collapseThreads')}
-                          onClick={(event) => { event.stopPropagation(); props.onToggleNode(row.id) }}
-                        >
-                          <FoldGlyph />
-                        </button>
-                      </>
-                    )}
-                </span>
-                <span className="cm-row-labels">
-                  <span className="cm-row-label">{row.title}</span>
-                  {row.note !== undefined && <span className="cm-row-note">{row.note}</span>}
-                </span>
-                {row.childCount > 0 && !showStatus && (
-                  <span className="cm-child-count" title={t('columns.childCount', { n: row.childCount })}>{row.childCount}</span>
-                )}
-                <StatusRollupBadge rollup={row.rollup} density={rollupDensity} />
-                {row.tools && (
-                  <span className="cm-row-actions">
-                    <button
-                      type="button"
-                      className="cm-icon-btn"
-                      title={row.kind === 'node'
-                        ? t('columns.newThreadInNode')
-                        : row.kind === 'ungrouped' ? t('columns.newThreadInUngrouped') : t('columns.newThreadInWorkspace')}
-                      aria-label={t('common.startConversation')}
-                      onClick={(event) => { event.stopPropagation(); props.onNewThread(row.id) }}
-                    >
-                      <NewThreadGlyph />
-                    </button>
-                    {row.menu !== false && (
-                      <button
-                        type="button"
-                        className="cm-icon-btn"
-                        title={t('common.more')}
-                        aria-label={t('common.more')}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          const rect = event.currentTarget.getBoundingClientRect()
-                          props.onMenu({ kind: row.kind === 'node' ? 'node' : 'workspace', id: row.id, x: rect.left, y: rect.bottom })
-                        }}
-                      >
-                        <EllipsisGlyph />
-                      </button>
-                    )}
-                  </span>
-                )}
-                {insertEdge !== null && (
-                  <span data-insert={insertEdge} style={insertionLineStyle(insertEdge)} aria-hidden="true" />
-                )}
-              </div>
-
-              {!row.collapsed && row.threads.map(thread => {
-                const threadDrop: DropState = props.dropKey === thread.sessionId ? props.dropState ?? 'none' : 'none'
-                const threadStyle = rowDragStyle(threadDrop, props.draggingKey === thread.sessionId)
-                return (
-                <div
-                  className="cm-thread-row"
-                  key={thread.sessionId}
-                  data-session-id={thread.sessionId}
-                  data-parent-node-id={row.kind === 'node' ? row.id : undefined}
-                  data-parent-workspace-id={row.kind === 'workspace' ? row.workspaceId ?? '' : undefined}
-                  data-selected={thread.sessionId === props.openSessionId}
-                  data-note={thread.note === undefined ? undefined : 'true'}
-                  data-search-active={props.activeRowKey !== undefined && thread.sessionId === props.activeRowKey ? 'true' : undefined}
-                  data-menu={thread.sessionId === props.menuRowId}
-                  data-dragging={props.draggingKey === thread.sessionId ? 'true' : 'false'}
-                  data-drop={threadDrop}
-                  style={threadStyle}
-                  aria-current={thread.sessionId === props.openSessionId ? 'page' : undefined}
-                  role="button"
-                  tabIndex={0}
-                  title={thread.title}
-                  onPointerDown={props.onRowPointerDown === undefined
-                    ? undefined
-                    : (event) => {
-                      props.onRowPointerDown?.(
-                        { kind: 'session', sessionId: thread.sessionId, workspaceId: thread.workspaceId ?? null },
-                        event,
-                      )
-                    }}
-                  onClick={() => { props.onOpenThread(thread.sessionId) }}
-                  onKeyDown={(event) => { if (event.key === 'Enter') props.onOpenThread(thread.sessionId) }}
-                >
-                  <span className="cm-slot">
-                    {thread.status !== undefined && (thread.status.state === 'ongoing'
-                      ? <RunningRing />
-                      : <StatusDot state={thread.status.state} label={thread.status.label} />)}
-                  </span>
-                  <span className="cm-row-labels">
-                    <span className="cm-row-label">{thread.title}</span>
-                    {thread.note !== undefined && <span className="cm-row-note">{thread.note}</span>}
-                  </span>
-                  {thread.status !== undefined && thread.status.compact !== ''
-                    ? <span className="cm-compact">{thread.status.compact}</span>
-                    : thread.time !== '' && <span className="cm-time">{thread.time}</span>}
-                  <span className="cm-row-actions">
-                    <button
-                      type="button"
-                      className="cm-icon-btn"
-                      title={t('common.more')}
-                      aria-label={t('common.more')}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        const rect = event.currentTarget.getBoundingClientRect()
-                        props.onMenu({ kind: 'thread', id: thread.sessionId, x: rect.left, y: rect.bottom })
-                      }}
-                    >
-                      <EllipsisGlyph />
-                    </button>
-                  </span>
-                </div>
-                )
-              })}
-
-              {!row.collapsed && row.threadFooter}
-            </div>
-          )
-        })}
+        {column.rows.map(row => <NodeGroup key={row.id} row={row} context={context} />)}
       </div>
+      {column.footerRow !== undefined && (
+        <div className="cm-col-footer">
+          <NodeGroup row={column.footerRow} context={context} />
+        </div>
+      )}
     </div>
   )
 }

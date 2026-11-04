@@ -8,6 +8,7 @@ export const drag: Record<keyof typeof zh, string> = {
   'drag.before': 'Insert before "{title}"',
   'drag.after': 'Insert after "{title}"',
   'drag.unorderedSuffix': ' (conversations are not ordered)',
+  'drag.carriedSuffix': ' · carries {n} conversation(s)',
   'drag.issue.NOT_FOUND': 'The target topic no longer exists',
   'drag.issue.WORKSPACE': 'Cannot move to another Workspace',
   'drag.issue.CYCLE': 'Cannot move under its own child',
@@ -18,4 +19,5 @@ export const drag: Record<keyof typeof zh, string> = {
   'drag.issue.NO_THREAD': 'The conversation no longer exists',
   'drag.issue.NONE': 'Cannot drop here',
   'drag.issue.UNGROUPED': 'Ungrouped items do not drag',
+  'drag.issue.ARCHIVED': 'Archived content cannot be dragged in or out; unarchive it instead.',
 }

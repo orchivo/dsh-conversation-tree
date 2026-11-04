@@ -153,10 +153,17 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
    is a frame too narrow for the band's own minimum, where the band collapses
    itself and the Conversation header's 「展开对话树」 seat takes over. */
 .cm-band-loading{display:flex;align-items:center;justify-content:center;height:100%;font-size:12px;color:var(--dsw-alias-label-secondary,currentColor);pointer-events:auto}
+/* The band's top bar is its own two-row chrome (leading row + space/search row),
+   at a height the panel computes from the measured leading row — see
+   bandHeaderHeight() in MapPanel.tsx. It keeps that height while the shipped
+   header is the 40px blank one, so the band's chrome does not reflow when a
+   blank Session opens or a Session starts: only the shipped header changes
+   height, the band's own second row is always there. The rule under it is
+   therefore always drawn, even on the blank landing page where the shipped
+   header beside it has none — it separates the band's chrome from its columns,
+   and the alternative (dropping it while the right side is blank) would make the
+   chrome's own baseline appear and disappear. */
 .cm-band-topbar{position:relative;flex:0 0 auto;display:flex;flex-direction:column;box-sizing:border-box;min-width:0;border-bottom:.5px solid var(--dsw-alias-border-l3,color-mix(in srgb,currentColor 14%,transparent));pointer-events:none}
-/* A blank Session renders the shipped Conversation header without its rule; the
-   band follows, so the two sides of the split meet on one seam. */
-.cm-band[data-compact="true"] .cm-band-topbar{border-bottom:none}
 /* The band/Conversation seam is one line for the band's whole height, and it is
    drawn by the resize handle itself (.cm-band-gutter::before, below). It used to
    be split in two: this header's ::after painted y=0..header, and the handle —
@@ -182,11 +189,14 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
    .cm-node-row's 8px), so the row reads as the node list's own header line —
    and the switcher gets the row's whole width instead of the chrome's leftovers,
    which is why it no longer has to be hidden on a narrow band.
+   The window-edge gutter below is part of the same rail: while the band owns
+   the frame's left edge, both this row and the first column step right by it
+   together, so the switcher keeps sitting on the list's own rail.
    The row is 28px but its contents are 24px and top-aligned: that leaves 4px of
    air above the seam, so the switcher stops reading as a tab glued to the column
    head right below it (measured before: the pill's bottom sat exactly on the
    seam, 0px above that head). */
-.cm-band-row2{display:flex;align-items:flex-start;gap:8px;flex:0 0 auto;height:28px;margin-top:8px;padding-left:calc(var(--cm-band-rail,14px) - 8px);padding-right:16px;min-width:0;overflow:clip;overflow-clip-margin:0;pointer-events:none}
+.cm-band-row2{display:flex;align-items:flex-start;gap:8px;flex:0 0 auto;height:28px;margin-top:8px;padding-left:calc(var(--cm-band-rail,14px) - 8px + var(--cm-band-window-gutter,0px));padding-right:16px;min-width:0;overflow:clip;overflow-clip-margin:0;pointer-events:none}
 .cm-band-row2>*{pointer-events:auto}
 .cm-band-row2>.cm-crumb{flex:0 1 auto;max-width:100%}
 /* Search shares this row, so it takes the same 24px — and border-box, because
@@ -204,7 +214,7 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
 .cm-band-search-toggle[data-open="true"]{background:color-mix(in srgb,var(--dsw-alias-brand-primary,currentColor) 10%,transparent);color:var(--dsw-alias-brand-primary,currentColor)}
 .cm-top-actions{display:flex;align-items:center;gap:8px;margin-left:auto;flex:0 0 auto}
 .cm-band-body{display:flex;flex:1 1 auto;min-height:0;min-width:0;position:relative;overflow:hidden;pointer-events:auto}
-.cm-band{--cm-band-gutter-width:8px;--cm-band-rail:14px}
+.cm-band{--cm-band-gutter-width:8px;--cm-band-rail:14px;--cm-band-window-gutter:0px}
 /* The band's right edge, from y=0 to the bottom: one strip that is BOTH the
    seam's hairline and its hit area, for the band's whole height.
    It is a child of .cm-band, not of .cm-band-body, and that is the whole point.
@@ -262,15 +272,34 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
 .cm-band-unavailable{position:fixed;left:16px;top:16px;z-index:30;display:flex;align-items:center;gap:10px;padding:8px 10px 8px 12px;border-radius:10px;border:1px solid var(--dsw-alias-border-l1,color-mix(in srgb,currentColor 16%,transparent));background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1,#fff));color:var(--dsw-alias-label-secondary,currentColor);font-size:12px;box-shadow:0 8px 24px color-mix(in srgb,currentColor 14%,transparent)}
 
 /* ── node area ─────────────────────────────────────────────────────────── */
-/* The fill stops half a hairline short of the seam: the line sits half the
-   handle's width minus half a hairline in from the band's right edge, so a
-   trailing margin of half the handle's width plus half a hairline ends the fill
-   exactly at the line's left edge. The divider then separates gray from the
-   Conversation's white on its own two sides — the relationship the shipped
-   column has with its own border — instead of leaving a sliver of fill to the
-   right of it. Reserving the strip narrows nothing a reader sees: it was empty
-   fill to begin with. */
-.cm-node-area{display:flex;flex:1 1 auto;min-width:0;min-height:0;overflow-x:auto;overflow-y:hidden;background:var(--dsw-specific-sidebar-fill,color-mix(in srgb,currentColor 3%,transparent));margin-right:calc(var(--cm-band-gutter-width,8px) / 2 + .5px)}
+/* The strip is transparent: the gray fill is painted by its frame
+   (.cm-band-main, below) for two reasons.
+   The fill has to stop half a hairline short of the seam — the divider sits
+   half the handle's width minus half a hairline in from the band's right edge,
+   so the frame keeps a trailing margin of half the handle's width plus half a
+   hairline, and the fill ends exactly at the line's left edge. The divider then
+   separates gray from the Conversation's white on its own two sides — the
+   relationship the shipped column has with its own border — instead of leaving
+   a sliver of fill to the right of it. Reserving the strip narrows nothing a
+   reader sees: it was empty fill to begin with.
+   And the strip fades its start side while columns are scrolled out of view
+   (below); a mask also fades the masked element's own background, so the fill
+   behind it has to come from an ancestor or the fade would open a slot onto
+   the Conversation's white at the window edge. */
+.cm-node-area{display:flex;flex:1 1 auto;min-width:0;min-height:0;overflow-x:auto;overflow-y:hidden}
+/* The start side while columns are scrolled out of view there: a scroll cut is
+   not a list edge, so it gets the shell's own overflow language — a masked fade
+   — rather than a private padding. 24px is the shell's horizontal-strip fade
+   (ui-dockkit's STRIP_FADE; the session rows' clipped titles use 12px because
+   they fade a text run, this fades a column). The resting window-edge gutter
+   above stays where it is: it belongs to the first column's content and scrolls
+   out of view with it, which is exactly what makes the cut legible as a cut.
+   The end side is deliberately not faded: its cut lands on the band's seam,
+   where the hairline and the resize handle already state the boundary. */
+.cm-node-area[data-scrolled="true"]{mask-image:linear-gradient(to right,transparent 0,#000 24px)}
+/* Dragging owns both edges: the auto-scroll bands and the insertion line are
+   aiming surfaces, so the fade steps aside while a row is in flight. */
+.cm-node-area[data-scrolled="true"][data-drag="true"]{mask-image:none}
 
 /* ── one node column ───────────────────────────────────────────────────── */
 .cm-node-col{flex:0 0 auto;display:flex;flex-direction:column;min-height:0;max-width:720px;overflow:hidden;border-right:1px solid var(--dsw-alias-border-l1,color-mix(in srgb,currentColor 12%,transparent));background:var(--dsw-specific-sidebar-fill,transparent)}
@@ -278,27 +307,62 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
 .cm-col-title{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cm-col-actions{display:flex;gap:4px;flex:0 0 auto}
 .cm-col-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding:0 6px 12px;display:flex;flex-direction:column}
+/* ── the window-edge gutter ────────────────────────────────────────────── */
+/* Map mode always collapses the product's left column, so on macOS and Windows
+   desktop the band's left edge IS the frame's left edge — the band stands
+   exactly where the shell's sidebar stood, and it is the only column whose left
+   side is a window boundary. It used to bring only its own in-column inset
+   (6px pill inset + 8px row padding = a 14px icon rail), which is measured from
+   a *seam* and is right for every later column, but reads cramped against the
+   window: the shell sidebar spends 12px of window padding
+   (--dsh-sidebar-inline-padding) before the same 8px row inset, i.e. a 20px
+   icon rail. Collapsing the sidebar took those 12px away with it, which is what
+   left the first column hugging the screen edge.
+   So while — and only while — the band owns the frame edge, its first column
+   pays the missing window padding (--cm-band-window-gutter, set from the
+   measured frame.left; 0 in every other state). The 6px value is not a new
+   rhythm: the column's own 6px pill inset plus 6px completes the sidebar's
+   12px, so the pills land at 12px, the icon rail at 20px and the titles at 42px
+   — the product's own Workspace-list rails. The second row above moves by the
+   same amount so the space switcher stays on that rail.
+   It is padding, not a margin: the gray fill keeps reaching the frame edge
+   (the band, like the sidebar it replaces, is an edge-attached strip), and the
+   column's outer width is untouched, so no column is narrowed and no horizontal
+   scrollbar appears.
+   Scoped with :first-child inside .cm-band on purpose: every later column's
+   left edge is a column seam, and the panels/dialogs live outside this
+   contract. */
+.cm-band .cm-node-col:first-child .cm-col-head{padding-left:calc(8px + var(--cm-band-window-gutter,0px))}
+.cm-band .cm-node-col:first-child .cm-col-scroll{padding-left:calc(6px + var(--cm-band-window-gutter,0px))}
+.cm-band .cm-node-col:first-child .cm-col-footer{padding-left:calc(6px + var(--cm-band-window-gutter,0px))}
 
 /* ── node rows and their conversations ─────────────────────────────────── */
 /* Geometry follows the application's own workspace list: a 34px node row over
    32px conversation rows, a 16px leading slot, and one soft hover fill. What
    separates the two kinds of row is the folder, the indent, and the colour.
 
-   Selection is a two-tier scale. The conversation being read is the focus and
-   carries the strongest mark — a brand fill, brand text, and a leading bar. The
-   node it lives in is the container around it, so it is marked one step quieter
-   with a paler tint, which keeps the node from outshouting the text being read.
-   That quieter mark also runs up the selected row's whole lineage — the
-   Workspace row and every ancestor topic — because those columns are open
-   *because* the selection lives under them. The chain is what tells the reader
-   which upper level's domain they are looking at (and about to add into) when
-   they work from a deep selection. Hover is the quietest of the three and never
-   repaints a selected or path row. */
+   The marks answer two different questions and never compete:
+   - "which branch does the conversation I am reading live under?" — the home
+     node and every container above it (the Workspace row and ancestor topics,
+     (data-session-path) carry a filled brand folder and the bold title. The
+     chain is permanent: it is the same wherever the navigation cursor points,
+     so a reader returning to the tree always sees where the live conversation
+     lives, even when its own column is not rendered.
+   - "where did I just click?" — the selected row draws a 1.5px inset outline
+     (62% brand) and the bold title. A row that is both selected and on the
+     home chain shows the chain style, not the outline: the chain is the
+     stronger, always-on statement, and the open conversation row itself already
+     says "you are reading this".
+   The conversation being read keeps the panel's only brand fill (16%, below).
+   The brand token equals the row's own ink, so a colour rule on a
+   node row paints nothing: the chain has to be stated through the icon fill and
+   the weight, and the selection through the inset geometry. Hover is the
+   quietest state and never repaints a selected row or a chain row. */
 .cm-node-row{display:flex;align-items:center;gap:6px;height:34px;box-sizing:border-box;padding:0 8px;border-radius:var(--dsw-radius-md,12px);cursor:pointer;user-select:none;font-size:14px;line-height:20px;color:var(--dsw-alias-label-primary,currentColor)}
 .cm-node-row[data-selectable="false"]{cursor:default}
-.cm-node-row:hover:not([data-selected="true"]):not([data-path-selected="true"]):not([data-selectable="false"]),.cm-node-row[data-menu="true"]:not([data-selected="true"]):not([data-path-selected="true"]):not([data-selectable="false"]){background:var(--dsw-alias-interactive-bg-hover,color-mix(in srgb,currentColor 7%,transparent))}
-.cm-node-row[data-selected="true"],.cm-node-row[data-path-selected="true"]{background:color-mix(in srgb,var(--dsw-alias-brand-primary,currentColor) 7%,transparent);color:var(--dsw-alias-brand-primary,currentColor);font-weight:500}
-.cm-node-row[data-selected="true"] .cm-slot,.cm-node-row[data-path-selected="true"] .cm-slot{color:inherit}
+.cm-node-row:hover:not([data-selected="true"]):not([data-session-path="true"]):not([data-selectable="false"]),.cm-node-row[data-menu="true"]:not([data-selected="true"]):not([data-session-path="true"]):not([data-selectable="false"]){background:var(--dsw-alias-interactive-bg-hover,color-mix(in srgb,currentColor 7%,transparent))}
+.cm-node-row[data-selected="true"]:not([data-session-path="true"]){background:transparent;color:var(--dsw-alias-brand-primary,currentColor);font-weight:600;box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--dsw-alias-brand-primary,currentColor) 62%,transparent)}
+.cm-node-row[data-selected="true"] .cm-slot{color:inherit}
 .cm-slot{flex:none;width:16px;height:20px;display:inline-flex;align-items:center;justify-content:center;color:var(--dsw-alias-label-tertiary,currentColor)}
 .cm-row-icon{width:16px;height:16px}
 .cm-folder{display:inline-flex}
@@ -312,13 +376,15 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
 .cm-chevron[data-open="true"] .cm-fold{transform:rotate(90deg)}
 /* Same leading geometry as a node row, so a conversation title lines up with the
    node title above it and the row spends no width on an extra indent. */
-.cm-thread-row{position:relative;display:flex;align-items:center;gap:6px;height:32px;box-sizing:border-box;padding:0 8px;border-radius:var(--dsw-radius-md,12px);cursor:pointer;user-select:none;font-size:14px;line-height:20px;color:var(--dsw-alias-label-secondary,currentColor)}
+.cm-thread-row{display:flex;align-items:center;gap:6px;height:32px;box-sizing:border-box;padding:0 8px;border-radius:var(--dsw-radius-md,12px);cursor:pointer;user-select:none;font-size:14px;line-height:20px;color:var(--dsw-alias-label-secondary,currentColor)}
 .cm-thread-row:hover:not([data-selected="true"]),.cm-thread-row[data-menu="true"]:not([data-selected="true"]){background:var(--dsw-alias-interactive-bg-hover,color-mix(in srgb,currentColor 7%,transparent));color:var(--dsw-alias-label-primary,currentColor)}
 /* The open conversation is what the reader is actually reading, so it is the
-   heaviest mark in the panel: a solid brand tint, brand text, a leading bar that
-   survives the row's status mark, and a quiet age. */
+   heaviest mark in the panel: a solid brand tint, brand text, and a quiet age.
+   It deliberately adds no leading bar: the tint is the column's only brand fill,
+   and the old 2px x 18px stub at the row's left edge read as a text caret next
+   to the title — the owner cut it on sight. The fill, the ink and the weight
+   are the whole mark. */
 .cm-thread-row[data-selected="true"]{background:color-mix(in srgb,var(--dsw-alias-brand-primary,currentColor) 16%,transparent);color:var(--dsw-alias-brand-primary,currentColor);font-weight:500}
-.cm-thread-row[data-selected="true"]::before{content:'';position:absolute;left:2px;top:7px;bottom:7px;width:2px;border-radius:1px;background:currentColor}
 .cm-thread-row[data-selected="true"] .cm-ring{color:inherit}
 .cm-thread-row[data-selected="true"] .cm-time,.cm-thread-row[data-selected="true"] .cm-compact{color:inherit;opacity:.72}
 .cm-row-labels{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:1px}
@@ -330,19 +396,43 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
 .cm-input-note{font-style:normal}
 .cm-node-row[data-note="true"],.cm-thread-row[data-note="true"]{height:auto;min-height:34px;padding-top:3px;padding-bottom:3px}
 .cm-thread-row[data-note="true"]{min-height:32px}
-.cm-node-row[data-selected="true"] .cm-row-note,.cm-node-row[data-path-selected="true"] .cm-row-note,
+.cm-node-row[data-selected="true"] .cm-row-note,
 .cm-thread-row[data-selected="true"] .cm-row-note{color:inherit;opacity:.72}
+/* ── the clipped-title tip ─────────────────────────────────────────────── */
+/* A row title is one ellipsized line, and the row a reader points at narrows
+   again (hover surfaces the actions), so the row under the pointer is exactly
+   where the full title cannot be read. RowTitleTip measures the label while the
+   row is hovered and shows this bubble only when it really clips.
+   The surface is the product's own tooltip: the same --dsw-alias-tooltip-bg
+   ink-on-light step, 13/20 type and 150ms fade as the design system's Tooltip,
+   so a plugin tip and a shell tip read as one language. It is portaled under
+   <body> (the column scroller clips, and the band's container-type is a
+   containing block for fixed descendants), which is why the portal layer's
+   z-index — the design system's portaled tooltip value, 1100 — is stated here.
+   visibility:hidden until RowTitleTip has measured and placed it; the element
+   never takes the pointer, because the bubble opens under the row the reader is
+   already on. max-width caps by the window as well as by text length, so a
+   long path wraps inside the viewport instead of running past its edge. */
+.cm-tip{position:fixed;left:0;top:0;z-index:1100;width:max-content;max-width:min(420px,calc(100vw - 24px));padding:3px 7px;border-radius:var(--dsw-radius-sm,6px);background:var(--dsw-alias-tooltip-bg,#2c2c2e);color:var(--dsw-static-neutral-bluish-00,#fff);font-size:13px;line-height:20px;white-space:pre-line;overflow-wrap:break-word;visibility:hidden;pointer-events:none;animation:cm-tip-in 150ms var(--ds-ease-in-out,ease)}
+@keyframes cm-tip-in{from{opacity:0}}
+@media (prefers-reduced-motion:reduce){.cm-tip{animation:none}}
 .cm-search-context{color:var(--dsw-alias-label-tertiary,currentColor)}
 .cm-search-mark{background:color-mix(in srgb,var(--dsw-alias-brand-primary,currentColor) 20%,transparent);color:inherit;border-radius:3px;padding:0 1px;font-weight:500}
 /* The search view's keyboard cursor: a ring, never a heavier selected mark, so
    the open conversation/selected row keeps its own weight. */
-.cm-node-row[data-search-active="true"],.cm-thread-row[data-search-active="true"]{outline:1.5px solid color-mix(in srgb,var(--dsw-alias-brand-primary,currentColor) 55%,transparent);outline-offset:-1px;background:color-mix(in srgb,var(--dsw-alias-brand-primary,currentColor) 9%,transparent)}
+.cm-node-row[data-search-active="true"],.cm-thread-row[data-search-active="true"]{outline:1.5px solid color-mix(in srgb,var(--dsw-alias-brand-primary,currentColor) 55%,transparent);outline-offset:-1px}
+/* The cursor's wash is spent only on rows that carry no other fill: the
+   selected node and the open conversation keep the single surface the map
+   allows them, and the cursor is still stated by the outline above. */
+.cm-node-row[data-search-active="true"]:not([data-selected="true"]),.cm-thread-row[data-search-active="true"]:not([data-selected="true"]){background:color-mix(in srgb,var(--dsw-alias-brand-primary,currentColor) 9%,transparent)}
 /* The descendant count keeps the trailing slot only while the row has nothing
    to report. A row that draws a status rollup drops it — the badge takes the
    slot (see showsStatusRollup in Columns.tsx) — and hover hides it too, because
    the row's actions land in that same corner. */
 .cm-child-count{flex:none;padding:0 2px;font-size:11px;color:var(--dsw-alias-label-tertiary,currentColor);font-variant-numeric:tabular-nums}
-.cm-node-row:hover .cm-child-count{display:none}
+/* The count yields to the hover actions on ordinary rows; the archive row has no
+   actions, so its count is the row's only trailing content and stays. */
+.cm-node-row:hover:not([data-kind="archive"]) .cm-child-count{display:none}
 /* ── node status rollups ─────────────────────────────────────────────────── */
 /* A row's conversations plus every descendant's, by category. The badge is
    read-only: no click, no popover, no hover card. Counts use the theme's state
@@ -391,18 +481,40 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
 .cm-row-actions{flex:none;display:none;align-items:center;gap:10px}
 .cm-node-row:hover .cm-row-actions,.cm-node-row[data-menu="true"] .cm-row-actions,
 .cm-thread-row:hover .cm-row-actions,.cm-thread-row[data-menu="true"] .cm-row-actions{display:inline-flex}
-.cm-thread-row:hover .cm-time,.cm-thread-row[data-menu="true"] .cm-time{display:none}
+/* The age yields only to actions that actually exist: a conversation whose menu
+   is suppressed (inside an archived block) keeps its age while hovered. */
+.cm-thread-row:hover:has(.cm-row-actions) .cm-time,
+.cm-thread-row[data-menu="true"]:has(.cm-row-actions) .cm-time{display:none}
 .cm-icon-btn{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;padding:0;border:0;background:transparent;color:var(--dsw-alias-label-tertiary,currentColor);cursor:pointer}
 .cm-icon-btn:hover{color:var(--dsw-alias-label-primary,currentColor)}
 .cm-glyph{width:16px;height:16px}
 .cm-more-row{font:inherit;font-size:12px;text-align:start;padding:6px 8px 6px 30px;border:0;background:transparent;color:var(--dsw-alias-label-tertiary,currentColor);cursor:pointer}
 .cm-more-row:hover{color:var(--dsw-alias-label-primary,currentColor)}
 
+/* ── the archive door and the pinned column footer ────────────────────── */
+/* 「已归档」 is a door, not a topic. It is pinned as the column's footer, outside
+   the column scroller: it never scrolls away, and the drag hit test (which
+   measures drop targets through that scroller) cannot read the strip as the
+   column's blank tail. Its ink is one step quieter than a topic row's — a
+   storage box instead of a folder — and it has no hover actions, so its count is
+   the row's only trailing content. Colors are the product's own tokens, so both
+   themes follow without a second palette. */
+.cm-col-footer{flex:0 0 auto;padding:0 6px 8px;background:var(--dsw-specific-sidebar-fill,transparent);border-top:1px solid var(--dsw-alias-border-l1,color-mix(in srgb,currentColor 12%,transparent))}
+.cm-node-row[data-kind="archive"]{color:var(--dsw-alias-label-secondary,currentColor);font-weight:500}
+.cm-node-row[data-kind="archive"] .cm-slot{color:var(--dsw-alias-label-tertiary,currentColor)}
+/* The archive row's one live mark sits ahead of the count: the same running ring
+   and warning dot a conversation row draws, in a slot that keeps the count's
+   right edge still when the mark appears. */
+.cm-row-activity{flex:none;display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px}
+
 
 /* The band body stacks the node strip and nothing else: the selected-node
    information bar that used to dock at its bottom was removed, so the strip
-   takes the whole height. */
-.cm-band-main{display:flex;flex:1 1 auto;flex-direction:column;min-width:0;min-height:0}
+   takes the whole height. The gray fill lives here rather than on the strip
+   because the strip's start fade masks it (see the node-area block above), and
+   the trailing margin is the seam reservation that keeps the fill's right edge
+   half a handle's width plus half a hairline short of the band's own edge. */
+.cm-band-main{display:flex;flex:1 1 auto;flex-direction:column;min-width:0;min-height:0;margin-right:calc(var(--cm-band-gutter-width,8px) / 2 + .5px);background:var(--dsw-specific-sidebar-fill,color-mix(in srgb,currentColor 3%,transparent))}
 
 /* ── column and region resize handles ──────────────────────────────────── */
 /* ── resize handles ────────────────────────────────────────────────────── */
@@ -485,11 +597,36 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
 .cm-field label{font-size:11px;color:var(--dsw-alias-label-secondary,currentColor)}
 .cm-field-row{display:flex;gap:6px;align-items:center}
 .cm-field-row .cm-input{flex:1;min-width:0}
+/* Dialog copy: quiet explanatory text inside the card. The one-time discovery
+   pill beside the seat is .cm-seat-hint — the two rules shared this name once,
+   and the pill's absolute placement leaked into every dialog's body copy. */
 .cm-hint{margin:0;font-size:11px;line-height:1.55;color:var(--dsw-alias-label-secondary,currentColor)}
+/* The one lead sentence of a confirmation, one step above the body copy, so the
+   question reads before the consequences below it. */
+.cm-dialog-lead{margin:0;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary,currentColor)}
+/* Consequences of a destructive action, gathered in one quiet box: the counts
+   and the conversation promise must not read as loose asides. */
+.cm-dialog-notes{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1,color-mix(in srgb,currentColor 12%,transparent));background:var(--dsw-alias-bg-layer-1,color-mix(in srgb,currentColor 3%,transparent))}
 .cm-input,.cm-select,.cm-textarea{font:inherit;font-size:12px;color:inherit;background:var(--dsw-alias-bg-layer-2,color-mix(in srgb,currentColor 5%,transparent));border:1px solid var(--dsw-alias-border-l1,color-mix(in srgb,currentColor 18%,transparent));border-radius:8px;padding:6px 8px;width:100%;box-sizing:border-box}
 .cm-textarea{min-height:56px;resize:vertical}
 .cm-toolbar{display:flex;flex-wrap:wrap;gap:6px}
 .cm-error{font-size:12px;color:var(--dsw-alias-state-error-primary,#d9534f)}
+.cm-field-error{margin:0;font-size:11px;line-height:1.5;color:var(--dsw-alias-state-error-primary,#d9534f)}
+/* The create dialog's location rail. Every entry point already named the
+   parent, so the dialog states where the node will land instead of offering a
+   picker: the root and parent stay visible, older ancestors collapse into …
+   when the 420px card cannot fit them. The rail is read-only and never enters
+   the Tab order; assistive tech reads it through its aria-label. */
+.cm-loc-field{display:flex;flex-direction:column;gap:4px}
+.cm-loc-label{font-size:11px;color:var(--dsw-alias-label-secondary,currentColor)}
+.cm-loc-rail{display:flex;align-items:center;gap:6px;min-width:0;padding:7px 10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1,color-mix(in srgb,currentColor 10%,transparent));background:var(--dsw-alias-bg-layer-2,color-mix(in srgb,currentColor 4%,transparent))}
+.cm-loc-crumbs{display:flex;align-items:center;gap:6px;min-width:0;overflow:hidden}
+.cm-loc-crumb{min-width:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,currentColor);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto}
+.cm-loc-crumb.is-root{flex:none;max-width:130px;display:inline-flex;align-items:center;gap:5px}
+.cm-loc-folder{width:13px;height:13px;flex:none;color:var(--dsw-alias-label-tertiary,currentColor)}
+.cm-loc-crumb.is-parent{color:var(--dsw-alias-label-primary,currentColor);font-weight:500}
+.cm-loc-sep{flex:none;font-size:11px;line-height:18px;color:var(--dsw-alias-label-tertiary,currentColor);opacity:.7}
+.cm-loc-more{flex:none;font-size:12px;color:var(--dsw-alias-label-tertiary,currentColor);cursor:help}
 .cm-pane-empty{margin:auto;font-size:12px;color:var(--dsw-alias-label-secondary,currentColor);text-align:center;padding:20px;line-height:1.6}
 
 /* ── space switcher ────────────────────────────────────────────────────── */
@@ -512,11 +649,9 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
    reads as a label rather than as body text. */
 .cm-band-row2 .cm-space-btn{height:24px;min-width:58px;padding:0 calc(var(--cm-band-rail,14px) - 7px);border-radius:8px;font-size:12.5px;font-weight:500;background:transparent;border-color:transparent}
 /* The entry carries the active space's status cluster so the reader can compare
-   it with the sidebar row's whole-map count; when the header is compact (no
-   second row) or the search field shares that row, the counts give way instead
-   of squeezing the chrome controls — the menu still lists every space's
-   numbers. */
-.cm-band[data-compact] .cm-space-btn .cm-rollup{display:none}
+   it with the sidebar row's whole-map count; the search field shares that row
+   when it opens, so the counts give way instead of squeezing the chrome
+   controls — the menu still lists every space's numbers. */
 @supports selector(:has(*)){
   /* The search field takes the row; both breadcrumb segments drop their clusters
      together (the root is inside .cm-crumb too, so one descendant selector covers
@@ -601,8 +736,9 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
 /* The one-time discovery hint: a quiet pill beside the icon-only expand seat.
    It is decorative (the button already carries the name), never takes pointer
    events, and disappears for good after the reader interacts with it or the
-   timer runs out. */
-.cm-hint{position:absolute;left:calc(100% + 8px);top:50%;transform:translateY(-50%);z-index:6;display:inline-flex;align-items:center;height:24px;padding:0 9px;border-radius:7px;background:var(--dsw-alias-bg-layer-2,#fff);border:1px solid var(--dsw-alias-border-l2,color-mix(in srgb,currentColor 18%,transparent));box-shadow:0 6px 18px -10px rgba(16,22,34,.45);font-size:11.5px;line-height:1;color:var(--dsw-alias-label-primary,currentColor);white-space:nowrap;pointer-events:none}
+   timer runs out. Its own class keeps the absolute placement out of .cm-hint,
+   which is the dialogs' body copy. */
+.cm-seat-hint{position:absolute;left:calc(100% + 8px);top:50%;transform:translateY(-50%);z-index:6;display:inline-flex;align-items:center;height:24px;padding:0 9px;border-radius:7px;background:var(--dsw-alias-bg-layer-2,#fff);border:1px solid var(--dsw-alias-border-l2,color-mix(in srgb,currentColor 18%,transparent));box-shadow:0 6px 18px -10px rgba(16,22,34,.45);font-size:11.5px;line-height:1;color:var(--dsw-alias-label-primary,currentColor);white-space:nowrap;pointer-events:none}
 
 /* The sidebar panel row's glyph (the sidebar.panellist row, 「对话树」).
    The shell owns the row: full-width button, hover fill, label in the wide
@@ -643,15 +779,33 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
 .cm-lead-icon:hover{background:var(--dsw-alias-interactive-bg-hover,color-mix(in srgb,currentColor 6%,transparent))}
 .cm-lead-icon:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,currentColor);outline-offset:2px}
 
-/* ── drag hysteresis: the candidate stays marked while the pointer is off ── */
-/* Leaving a row for the gutter, a column's blank tail, or the band's edge does
-   not drop the candidate: the row keeps saying "this is still where it would
-   land", in the dashed shape that reads as provisional. The line it would insert
-   at fades with it, so a held row never looks like a committed one. Release
-   still commits only on a row, so the dashed mark promises nothing it cannot
-   keep. */
-.cm-node-row[data-drop="held"],.cm-thread-row[data-drop="held"]{outline:1px dashed var(--dsw-alias-border-l2,color-mix(in srgb,currentColor 32%,transparent));outline-offset:-1px}
-.cm-node-row[data-drop="held"] [data-insert],.cm-thread-row[data-drop="held"] [data-insert]{opacity:.55}
+/* ── drop groups: the whole block is the target ────────────────────────── */
+/* A drag target is no longer a row: it is the group (header + the
+   conversations it owns + the "show more" footer). The wrapper carries the
+   mark inline (Columns.tsx owns the gesture's visuals), so the sheet only
+   contributes what must be shared or interaction-wide: the card's geometry, the
+   boundary insertion line's stacking, hover silence while dragging, and the
+   refused cursor. */
+.cm-node-group{position:relative;border-radius:12px}
+/* The 2px line sits on the group's own outer edge, so it reads as "between
+   groups" rather than "on this row"; keep it above the rows it crosses. */
+.cm-node-group>[data-insert]{z-index:4;border-radius:1px}
+/* While a drag is in flight the group's mark is the pointer's target. Row hover
+   would paint a second, competing fill underneath it; the row tools also stop
+   offering themselves under a gesture. */
+.cm-node-area[data-drag="true"] .cm-node-row:hover:not([data-selected="true"]):not([data-selectable="false"]),
+.cm-node-area[data-drag="true"] .cm-thread-row:hover:not([data-selected="true"]){background:transparent}
+.cm-node-area[data-drag="true"] .cm-row-actions{display:none}
+/* A refused group says no through the cursor; the pointer label carries the
+   wording, so the block itself is never greyed out (that would read as "gone"). */
+.cm-node-group[data-drop-group="invalid"],
+.cm-node-group[data-drop-group="invalid"] .cm-node-row,
+.cm-node-group[data-drop-group="invalid"] .cm-thread-row{cursor:no-drop}
+/* Hysteresis: the group under a pointer that has left every group keeps its
+   provisional (dashed) mark and the label it had. This rule only de-emphasises
+   the inline mark's insertion line so a held group never looks committed. */
+.cm-node-group[data-drop-group="held"]>[data-insert]{opacity:.55}
+
 
 /* ── the move dialog's width (BL-2) ────────────────────────────────────── */
 /* The tree picker is the one dialog body that needs more room than a form, so
@@ -676,6 +830,53 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
 .cm-move-tree-toggle{flex:none;display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;padding:0;border:0;border-radius:4px;background:transparent;color:inherit;cursor:pointer;transform:rotate(0deg);transition:transform .12s ease}
 .cm-move-tree-toggle[data-expanded="true"]{transform:rotate(90deg)}
 .cm-move-tree-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ── session-home: the home chain, and the composer line ───────────────── */
+/* The map's answer to "where does what I type belong?" is one permanent tree
+   mark plus one composer line. The home row and every container above it carry
+   data-session-path; the sheet paints the chain with the filled brand folder
+   and the bold title — no surface, no ring, no outline — so the branch stays
+   readable at a glance after the selection moved elsewhere. The selection
+   border only appears on a row that is *not* on the chain (owner's rule: the
+   chain wins when both apply). When the selection has left the home, the
+   composer gains a quiet 30px line naming the chain — space › workspace ›
+   topic — with no verdict and no actions. Plan A removed the 5px gutter ring
+   and the two grey lanes that used to carry bits of this meaning. */
+.cm-node-row[data-session-path="true"]{background:transparent;font-weight:600}
+.cm-node-row[data-session-path="true"] .cm-slot{color:var(--dsw-alias-brand-primary,currentColor)}
+.cm-node-row[data-session-path="true"] .cm-row-icon path{fill:currentColor}
+
+/* Hover and a pinned menu swap the folder for the fold arrow (the product's own
+   leading-slot rule). The chain row's arrow takes the brand colour too, so the
+   always-on mark survives the pointer instead of vanishing under it. */
+.cm-node-row[data-session-path="true"]:hover .cm-chevron,
+.cm-node-row[data-session-path="true"][data-menu="true"] .cm-chevron{color:var(--dsw-alias-brand-primary,currentColor)}
+
+/* The composer-side context line: a 30px bar on the dock column (the GoalBar
+   formula's side clearance and dock inset) capped at the composer card's own
+   width, so it lines up with the input card instead of the wider stack. It is a
+   soft surface, not a card: a layer-2 fill, an 8px radius, one quiet row, no
+   shadow and no controls. The line opens with the 「当前会话」 badge and no
+   icon — the badge names the row in words, so a glyph would only repeat it. The
+   badge carries the brand accent; the path keeps the secondary ink and its last
+   hop — the open conversation's own title — is the only 600-weight text, so the
+   row reads as one address that ends at the conversation itself. The title sits
+   outside the segment group: that group clips its tail, and a long chain must
+   ellipsize instead of pushing the name of the conversation being typed into
+   off the bar, so the title keeps a width floor of its own. One line only; the
+   hover title keeps the whole address. */
+.cm-home-path{box-sizing:border-box;display:flex;align-items:center;gap:8px;width:calc(100% - 2*var(--dsh-composer-side-clearance) - 4*var(--dsh-composer-dock-inset));max-width:calc(var(--dsh-composer-card-max-width) - 4*var(--dsh-composer-dock-inset));height:30px;min-width:0;margin:0 auto;padding:0 10px;overflow:hidden;font-size:12.5px;line-height:1;color:var(--dsw-alias-label-secondary,currentColor);white-space:nowrap;background:color-mix(in srgb,var(--dsw-alias-brand-primary,currentColor) 5%,transparent);border-radius:8px}
+.cm-home-path-label{flex:none;display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:6px;background:color-mix(in srgb,var(--dsw-alias-brand-primary,currentColor) 10%,transparent);color:var(--dsw-alias-brand-primary,currentColor);font-size:11px;font-weight:500;line-height:1}
+.cm-home-path-segments{flex:0 1 auto;display:inline-flex;align-items:center;min-width:0;overflow:hidden}
+.cm-home-path-part{display:inline-flex;align-items:center;min-width:0}
+.cm-home-path-seg{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cm-home-path-seg[data-last="true"]{color:var(--dsw-alias-label-primary,currentColor);font-weight:600}
+.cm-home-path-thread{min-width:84px;max-width:280px;overflow:hidden}
+.cm-home-path-thread-seg{max-width:260px}
+.cm-home-path-sep{flex:none;padding:0 5px;color:var(--dsw-alias-label-tertiary,currentColor);opacity:.7}
+/* The bar's own 8px gap already stands between the chain group and the title,
+   so its separator carries 3px less on the left to keep the 10px hop rhythm. */
+.cm-home-path-thread .cm-home-path-sep{padding:0 5px 0 2px}
 `
 
 /**

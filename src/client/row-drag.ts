@@ -24,7 +24,8 @@
  * namespace, never in this module.
  */
 import {
-  MAX_DEPTH, assignThreadIssue, moveNodeIssue, threadOfSession, workspaceOfNode,
+  MAX_DEPTH, assignThreadIssue, descendantIds, inArchive, isArchivedThread, moveNodeIssue, threadOfSession,
+  workspaceOfNode,
   type MapNode, type MapState, type MoveIssue,
 } from '../shared/model.js'
 import type { Translate } from '../shared/copy.js'
@@ -63,14 +64,21 @@ export interface DropCandidate {
   edge: DropKind
 }
 
-/** The destination sentence a valid drop would produce, before localization. */
+/**
+ * The destination sentence a valid drop would produce, before localization.
+ *
+ * `carried` is the number of conversations that travel with a dragged topic
+ * (its own plus every descendant's). It is only present when that number is
+ * positive, and it is part of the structured label rather than a formatted
+ * suffix so the wording stays in the locale dictionary.
+ */
 export type DragLabel =
   | { kind: 'issue'; code: string }
   | { kind: 'unchanged' }
-  | { kind: 'workspace' }
-  | { kind: 'under'; title: string }
-  | { kind: 'before'; title: string }
-  | { kind: 'after'; title: string }
+  | { kind: 'workspace'; carried?: number }
+  | { kind: 'under'; title: string; carried?: number }
+  | { kind: 'before'; title: string; carried?: number }
+  | { kind: 'after'; title: string; carried?: number }
   | { kind: 'sessionWorkspace'; unordered: boolean }
   | { kind: 'sessionUnder'; title: string; unordered: boolean }
 
@@ -142,18 +150,33 @@ export function formatDragLabel(t: Translate, label: DragLabel): string {
     case 'unchanged':
       return t('drag.unchanged')
     case 'workspace':
-      return t('drag.workspace')
+      return withCarried(t, t('drag.workspace'), label.carried)
     case 'under':
-      return t('drag.under', { title: label.title })
+      return withCarried(t, t('drag.under', { title: label.title }), label.carried)
     case 'before':
-      return t('drag.before', { title: label.title })
+      return withCarried(t, t('drag.before', { title: label.title }), label.carried)
     case 'after':
-      return t('drag.after', { title: label.title })
+      return withCarried(t, t('drag.after', { title: label.title }), label.carried)
     case 'sessionWorkspace':
       return withUnorderedNote(t, t('drag.workspace'), label.unordered)
     case 'sessionUnder':
       return withUnorderedNote(t, t('drag.under', { title: label.title }), label.unordered)
   }
+}
+
+/**
+ * Append the "carrying N conversations" note to a topic's destination sentence.
+ *
+ * A topic drag moves the whole subtree, conversations included, and that is the
+ * most expensive accidental write the gesture can make; the note states the
+ * cost before the release instead of after it.
+ * @param t - the active translator.
+ * @param base - the destination sentence.
+ * @param carried - conversations that would move with the topic, when known.
+ * @returns the sentence with the note when there is something to carry.
+ */
+function withCarried(t: Translate, base: string, carried: number | undefined): string {
+  return carried === undefined || carried <= 0 ? base : base + t('drag.carriedSuffix', { n: carried })
 }
 
 /**
@@ -234,6 +257,20 @@ export function decideDrop(state: MapState, payload: DragPayload, candidate: Dro
   if (row.kind === 'none') {
     return refusedCode('NONE')
   }
+  // Archived content is a reading surface: entering or leaving it is an
+  // explicit menu action (archive / unarchive), never a drag. The panel already
+  // keeps the archive column out of the hit-test geometry; this is the backstop
+  // for a stale payload or a document change mid-gesture.
+  if (payload.kind === 'node' && inArchive(state, payload.nodeId)) {
+    return refusedCode('ARCHIVED')
+  }
+  if (payload.kind === 'session') {
+    const carried = threadOfSession(state, payload.sessionId)
+    if (carried !== undefined && isArchivedThread(carried)) return refusedCode('ARCHIVED')
+  }
+  if (row.kind === 'node' && inArchive(state, row.nodeId)) {
+    return refusedCode('ARCHIVED')
+  }
   // The ungrouped bucket is a conversation list, not a Workspace: it has no
   // Workspace for a target to agree with, so nothing in it drags and nothing
   // drops into it.
@@ -252,18 +289,19 @@ export function decideDrop(state: MapState, payload: DragPayload, candidate: Dro
     return refusedCode('WORKSPACE')
   }
 
+  const carried = carriedThreads(state, source.id)
   if (row.kind === 'workspace') {
-    return planNode(state, source, null, null, { kind: 'workspace' })
+    return planNode(state, source, null, null, { kind: 'workspace', carried })
   }
   const target = state.nodes.find(node => node.id === row.nodeId)
   if (target === undefined) {
     return refusedCode('NOT_FOUND')
   }
   if (candidate.edge === 'into') {
-    return planNode(state, source, target.id, null, { kind: 'under', title: target.title })
+    return planNode(state, source, target.id, null, { kind: 'under', title: target.title, carried })
   }
   if (candidate.edge === 'before') {
-    return planNode(state, source, target.parentId, target.id, { kind: 'before', title: target.title })
+    return planNode(state, source, target.parentId, target.id, { kind: 'before', title: target.title, carried })
   }
   const siblings = siblingsOf(state, target.parentId, workspaceId)
   return planNode(
@@ -271,8 +309,28 @@ export function decideDrop(state: MapState, payload: DragPayload, candidate: Dro
     source,
     target.parentId,
     nextSiblingId(siblings, target.id),
-    { kind: 'after', title: target.title },
+    { kind: 'after', title: target.title, carried },
   )
+}
+
+/**
+ * How many conversations would travel with a topic.
+ *
+ * A topic move re-parents the node and leaves `threads` untouched, so the whole
+ * subtree's conversations follow it implicitly. The pointer label states that
+ * number because it is the least visible part of the write and the most
+ * expensive to undo by hand.
+ * @param state - the map.
+ * @param nodeId - the topic that would move.
+ * @returns the conversations filed under it or any descendant.
+ */
+function carriedThreads(state: MapState, nodeId: string): number {
+  const subtree = descendantIds(state, nodeId)
+  let count = 0
+  for (const thread of state.threads) {
+    if (thread.nodeId !== null && subtree.has(thread.nodeId)) count += 1
+  }
+  return count
 }
 
 /** A conversation drop: into a topic, or directly under its own Workspace row. */
@@ -348,5 +406,151 @@ function planNode(
     issue: null,
     noop: false,
     label,
+  }
+}
+
+/* ── group-level hit testing ────────────────────────────────────────────── */
+
+/**
+ * One column's hit interval, measured from its scroll box (`.cm-col-scroll`).
+ *
+ * The rect includes the column's own left/right padding, so a pointer in the
+ * 6px gutter *inside* the column still belongs to it; the inter-column gutter
+ * is outside every rect and answers `none`.
+ */
+export interface ColumnRect {
+  key: string
+  left: number
+  right: number
+  top: number
+  bottom: number
+}
+
+/**
+ * One drop group: a header row plus the conversation rows it owns in the same
+ * column (and the "show more" footer, when there is one).
+ *
+ * The group is the target, not any row inside it: `key` is stable (`node:<id>`,
+ * `workspace:<workspaceId>`, `ungrouped:<rowKey>`) so a collapsed/expanded or
+ * re-measured group keeps its identity across column rebuilds.
+ */
+export interface GroupRect {
+  key: string
+  kind: 'node' | 'workspace' | 'ungrouped'
+  /** The column this group lives in (matches {@link ColumnRect.key}). */
+  columnKey: string
+  /** The topic's id for a `node` group; `null` otherwise. */
+  nodeId: string | null
+  /** The Workspace the header belongs to; `null` for the ungrouped bucket. */
+  workspaceId: string | null
+  top: number
+  bottom: number
+  /** Height of the header row: a collapsed group is exactly this tall. */
+  headerHeight: number
+}
+
+/**
+ * What the pointer is aimed at while a drag is in flight.
+ *
+ * `zone === 'tail'` is the column's blank tail below the last group: for a
+ * topic payload that means "append to this level", for a conversation payload
+ * there is no target (the caller turns the whole hit into `null`).
+ */
+export interface GroupHit {
+  zone: 'group' | 'tail' | 'none'
+  /** The group under the pointer; for a tail hit, the column's last group. */
+  group: GroupRect | null
+  column: ColumnRect | null
+  /** Insertion intent; always `into` for workspace/ungrouped groups. */
+  mode: 'into' | 'before' | 'after'
+}
+
+/** Height of a group's reorder band, in CSS pixels. */
+export const GROUP_EDGE_PX = 8
+
+/** Narrowest `into` interval a collapsed group's two bands must leave. */
+export const GROUP_MIN_INTO_PX = 12
+
+/** The group a pointer at `point` is over, as geometry only (no DOM). */
+export function hitGroupAt(
+  point: { x: number; y: number },
+  columns: readonly ColumnRect[],
+  groups: readonly GroupRect[],
+): GroupHit {
+  const column = columns.find(candidate =>
+    point.x >= candidate.left && point.x < candidate.right
+    && point.y >= candidate.top && point.y < candidate.bottom)
+  if (column === undefined) return { zone: 'none', group: null, column: null, mode: 'into' }
+
+  const inColumn = groups.filter(group => group.columnKey === column.key)
+  const group = inColumn.find(candidate => point.y >= candidate.top && point.y < candidate.bottom)
+  if (group === undefined) {
+    let last: GroupRect | null = null
+    for (const candidate of inColumn) {
+      if (last === null || candidate.bottom > last.bottom) last = candidate
+    }
+    // The blank tail below the last group is a "append to this level" zone for
+    // topics; a conversation payload turns the hit into no target upstream.
+    if (last !== null && point.y >= last.bottom) {
+      return { zone: 'tail', group: last, column, mode: 'after' }
+    }
+    return { zone: 'none', group: null, column, mode: 'into' }
+  }
+
+  // A workspace/un group header has no sibling order of its own: every y in it
+  // means the same thing (drop under that Workspace / move to its top level).
+  if (group.kind !== 'node') return { zone: 'group', group, column, mode: 'into' }
+
+  const height = group.bottom - group.top
+  const collapsed = height <= group.headerHeight + 0.5
+  const band = collapsed
+    ? Math.min(GROUP_EDGE_PX, Math.max(0, (height - GROUP_MIN_INTO_PX) / 2))
+    : GROUP_EDGE_PX
+  const mode = band <= 0
+    ? 'into'
+    : point.y < group.top + band
+      ? 'before'
+      : point.y >= group.bottom - band
+        ? 'after'
+        : 'into'
+  return { zone: 'group', group, column, mode }
+}
+
+/**
+ * Turn a group hit into the candidate `decideDrop` already understands.
+ *
+ * The model's vocabulary is unchanged; only the *source* of the candidate is
+ * new. A conversation payload never implies sibling order: its vertical
+ * position inside a group is not a sort slot, so it always maps to `into`.
+ * A `null` answer means "no target here" — the panel holds the previous
+ * candidate and a release writes nothing.
+ * @param hit - the measured group hit.
+ * @param payload - the row the drag started from.
+ * @returns the candidate to judge, or null when the hit carries no target.
+ */
+export function candidateFromGroupHit(hit: GroupHit, payload: DragPayload): DropCandidate | null {
+  if (hit.zone === 'none' || hit.group === null) return null
+  const group = hit.group
+  if (group.kind === 'ungrouped') return { row: { kind: 'none' }, edge: 'into' }
+  if (group.kind === 'workspace') {
+    return group.workspaceId === null
+      ? { row: { kind: 'none' }, edge: 'into' }
+      : { row: { kind: 'workspace', workspaceId: group.workspaceId }, edge: 'into' }
+  }
+  // The column tail has no conversation slot: topics append to a level, but a
+  // conversation's destination is a topic (or the Workspace root), and the tail
+  // names neither. Reporting "no target" keeps the old row fallback from
+  // silently filing the conversation under the last topic of the column.
+  if (hit.zone === 'tail' && payload.kind === 'session') return null
+  // A conversation has no manual order: the rest of the group and its reorder
+  // band both mean "same destination", never "insert at this slot".
+  if (payload.kind === 'session') {
+    if (group.nodeId === null) return { row: { kind: 'none' }, edge: 'into' }
+    return { row: { kind: 'node', nodeId: group.nodeId, workspaceId: group.workspaceId }, edge: 'into' }
+  }
+  if (group.nodeId === null) return { row: { kind: 'none' }, edge: 'into' }
+  return {
+    row: { kind: 'node', nodeId: group.nodeId, workspaceId: group.workspaceId },
+    edge: hit.zone === 'tail' ? 'after' : hit.mode,
   }
 }

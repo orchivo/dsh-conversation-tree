@@ -19,6 +19,7 @@ export const model: Record<keyof typeof zh, string> = {
   'model.error.HAS_CHILDREN': 'Move or delete the child topics first.',
   'model.error.SUBAGENT': 'A subagent conversation cannot be filed under a topic.',
   'model.error.SPACE': 'Only ungrouped conversations in the default space can be filed under the ungrouped topic.',
+  'model.error.ARCHIVED': 'That item is archived; unarchive it first.',
   'model.error.STORE_LOADING': 'The conversation tree is still loading; try again shortly.',
   'model.error.PICKER_MACOS': 'The Host-spawned directory picker cannot take clicks on macOS.',
   'model.error.PICKER_MISSING': 'The current client provides no directory picker.',

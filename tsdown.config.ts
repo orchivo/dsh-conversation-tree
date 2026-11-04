@@ -34,6 +34,7 @@ export default [
     entry: {
       panel: 'src/client/MapPanel.tsx',
       entries: 'src/client/Entries.tsx',
+      home: 'src/client/HomeNotice.tsx',
       view: 'src/client/ViewToggle.tsx',
       status: 'src/client/StatusRollup.tsx',
       locale: 'src/client/locale.tsx',
@@ -63,6 +64,9 @@ export default [
       'error-text': 'src/client/error-text.ts',
       persistence: 'src/shared/persistence.ts',
       'view-state': 'src/shared/view-state.ts',
+      'session-home': 'src/shared/session-home.ts',
+      'view-bridge': 'src/client/view-bridge.ts',
+      'composer-focus': 'src/client/composer-focus.ts',
       'mode-memory': 'src/shared/mode-memory.ts',
       'status-rollup': 'src/shared/status-rollup.ts',
       'status-ledger': 'src/client/status-ledger.ts',

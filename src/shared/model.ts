@@ -34,6 +34,19 @@ export interface MapNode {
    * first level — it is resolved once the Workspace list is known.
    */
   workspaceId?: string | null
+  /**
+   * When the topic was moved into its Workspace's archive, as an ISO stamp.
+   *
+   * Only an archived top-level topic carries it: archiving detaches the block
+   * (`parentId → null`), so the descendants and conversations inside it need no
+   * mark of their own — the block owns the state.
+   */
+  archivedAt?: string
+  /**
+   * Parent the topic returns to when it leaves the archive; `null` = it was a
+   * Workspace root. Kept while archived, cleared once it is restored.
+   */
+  archivedParentId?: string | null
 }
 
 /**
@@ -66,6 +79,14 @@ export interface ThreadRef {
    * Workspace, because Workspace membership wins.
    */
   spaceId?: string | null
+  /**
+   * When the conversation was archived on its own, as an ISO stamp.
+   *
+   * `nodeId` is kept: it remembers the topic the conversation returns to when it
+   * is unarchived. A conversation filed inside an archived topic carries no mark
+   * — the archived block owns the state, and unarchiving it happens as a block.
+   */
+  archivedAt?: string
 }
 
 /** One Workspace projection the map groups by. */
@@ -135,7 +156,11 @@ export interface SessionSummaryLike {
    * row to, because it is reached from its parent.
    */
   origin?: string
-  /** Owning parent conversation, when this is a subagent child. */
+  /**
+   * Owning parent conversation: the source a fork branched from, or the parent
+   * of a subagent child. Only a fork becomes a row that can inherit its
+   * source's place; a subagent child is reached from its parent instead.
+   */
   parentId?: string | null
 }
 
@@ -150,6 +175,16 @@ export const UNGROUPED_ID = '@ungrouped'
 
 /** Prefix shared by every Workspace selection key. */
 export const WORKSPACE_SELECTION_PREFIX = '@ws:'
+
+/**
+ * Prefix shared by every "Archived" row selection key.
+ *
+ * The archive is a synthetic row, not a stored node: it is the last row of one
+ * Workspace's topic column and names the Workspace whose archived content it
+ * opens. Like `@ws:<id>` it is a first-class selection key, so a selected
+ * archive row survives a refresh instead of falling out of the live set.
+ */
+export const ARCHIVE_SELECTION_PREFIX = '@archive:'
 
 /** Prefix shared by the per-space "ungrouped" row keys (except the default space). */
 export const LOOSE_ROW_PREFIX = '@loose:'
@@ -278,8 +313,12 @@ export function workspaceKey(workspaceId: string | null): string {
  *
  * One key per level above the topic — every ancestor topic id, root first — and
  * the Workspace row that owns the chain (`workspaceKey`; the ungrouped bucket
- * for a legacy rootless topic). The selected row itself is left out: it carries
- * the selection's own mark, and repeating it here would only draw one row twice.
+ * for a legacy rootless topic). A topic inside the archive also names the
+ * archive row it was opened from, right below the in-archive ancestors: the
+ * archive is a synthetic row between the Workspace row and the topics it stores,
+ * so omitting it would draw the chain through a row the reader never opened.
+ * The selected row itself is left out: it carries the selection's own mark, and
+ * repeating it here would only draw one row twice.
  * Unknown ids yield no rows, so a view pointing at a deleted node marks nothing.
  * @param state - the map document.
  * @param nodeId - the selected topic.
@@ -288,10 +327,11 @@ export function workspaceKey(workspaceId: string | null): string {
 export function ancestorRowKeys(state: MapState, nodeId: string): string[] {
   const path = nodePath(state, nodeId)
   if (path.length === 0) return []
-  return [
-    ...path.slice(0, -1).map(node => node.id),
-    workspaceKey(workspaceOfNode(path[0])),
-  ]
+  const workspaceId = workspaceOfNode(path[0])
+  const rows = path.slice(0, -1).map(node => node.id)
+  if (inArchive(state, nodeId) && workspaceId !== null) rows.push(archiveKey(workspaceId))
+  rows.push(workspaceKey(workspaceId))
+  return rows
 }
 
 /** The selection key that would be selected after deleting one topic node. */
@@ -317,6 +357,35 @@ export function workspaceSelection(key: string | null): { workspaceId: string | 
   if (key === UNGROUPED_ID) return { workspaceId: null }
   if (!key.startsWith(WORKSPACE_SELECTION_PREFIX)) return undefined
   return { workspaceId: key.slice(WORKSPACE_SELECTION_PREFIX.length) }
+}
+
+/**
+ * The selection key that opens one Workspace's archived row.
+ * @param workspaceId - the Workspace whose archive the row opens.
+ * @returns the stable `@archive:<workspaceId>` key.
+ */
+export function archiveKey(workspaceId: string): string {
+  return `${ARCHIVE_SELECTION_PREFIX}${workspaceId}`
+}
+
+/**
+ * Whether a selection key names an archived row.
+ * @param key - selection key, or null/undefined.
+ * @returns true while the key is one of the archive keys.
+ */
+export function isArchiveSelectionKey(key: string | null | undefined): boolean {
+  return typeof key === 'string' && key.startsWith(ARCHIVE_SELECTION_PREFIX)
+}
+
+/**
+ * Read an archive selection key.
+ * @param key - selection key, or null/undefined.
+ * @returns the Workspace it opens, or undefined when the key names another row.
+ */
+export function archiveSelection(key: string | null | undefined): { workspaceId: string } | undefined {
+  if (typeof key !== 'string' || !isArchiveSelectionKey(key)) return undefined
+  const workspaceId = key.slice(ARCHIVE_SELECTION_PREFIX.length)
+  return workspaceId === '' ? undefined : { workspaceId }
 }
 
 /* ── spaces ──────────────────────────────────────────────────────────────── */
@@ -709,24 +778,535 @@ export function threadOfSession(state: MapState, sessionId: string): ThreadRef |
   return state.threads.find(thread => thread.sessionId === sessionId)
 }
 
+/* ── archive ─────────────────────────────────────────────────────────────── */
+
+/*
+ * Archiving is stowing content away, not freezing it: an archived topic is
+ * detached from the active tree (`parentId → null`, original parent remembered)
+ * and its whole block — descendants and conversations — travels with it, while
+ * an archived conversation only gains a mark and keeps its place. Nothing here
+ * touches the Host's native archive: archived conversations stay openable,
+ * searchable, and runnable.
+ */
+
+/** Whether a topic carries an archive mark of its own. */
+export function isArchivedNode(node: MapNode): boolean {
+  return node.archivedAt !== undefined && node.archivedAt !== ''
+}
+
+/** Whether a conversation was archived on its own. */
+export function isArchivedThread(thread: ThreadRef): boolean {
+  return thread.archivedAt !== undefined && thread.archivedAt !== ''
+}
+
 /**
- * The node selection a conversation makes active.
+ * The nearest archived ancestor of one topic, the topic itself included.
  *
- * Reading a conversation inside the map means being at its home: the topic it is
- * filed under, or the Workspace row when it sits directly under one. A stale
- * index may still name a deleted topic, so the topic only wins while it exists.
+ * Walks the parent chain with a visited set: a hand-built document may loop, and
+ * asking "is this in the archive?" must always answer instead of recursing.
+ * @param state - the map.
+ * @param nodeId - the topic to inspect.
+ * @returns the archived block root, or undefined for an active or unknown topic.
+ */
+export function archivedRootOf(state: MapState, nodeId: string): MapNode | undefined {
+  const byId = new Map(state.nodes.map(node => [node.id, node]))
+  const seen = new Set<string>()
+  let current = byId.get(nodeId)
+  while (current !== undefined && !seen.has(current.id)) {
+    seen.add(current.id)
+    if (isArchivedNode(current)) return current
+    current = current.parentId === null ? undefined : byId.get(current.parentId)
+  }
+  return undefined
+}
+
+/**
+ * Whether one topic is stored in the archive — marked itself or below a marked
+ * ancestor.
+ * @param state - the map.
+ * @param nodeId - the topic to inspect.
+ * @returns true while the topic is archived.
+ */
+export function inArchive(state: MapState, nodeId: string): boolean {
+  return archivedRootOf(state, nodeId) !== undefined
+}
+
+/** Every topic the archive hides: each archived root together with its subtree. */
+function archivedNodeIds(state: MapState): Set<string> {
+  const ids = new Set<string>()
+  for (const node of state.nodes) {
+    if (!isArchivedNode(node)) continue
+    for (const id of descendantIds(state, node.id)) ids.add(id)
+  }
+  return ids
+}
+
+/**
+ * The archived block roots of one Workspace, newest archive first.
  *
- * An ungrouped conversation has no node to activate: its row is a conversation
- * list, not a container, so it returns `null` and the caller leaves the reader's
- * selection alone.
+ * Only the roots: a block is restored and deleted as a whole, so listing its
+ * descendants here would offer the same action once per level.
+ * @param state - the map.
+ * @param workspaceId - the Workspace whose archive is listed.
+ * @returns the block roots, newest `archivedAt` first, then by title.
+ */
+export function archivedRootsOf(state: MapState, workspaceId: string): MapNode[] {
+  const wanted = ownerOf(workspaceId)
+  return state.nodes
+    .filter(node => node.parentId === null && isArchivedNode(node) && ownerOf(node.workspaceId) === wanted)
+    .sort((left, right) =>
+      stampOf(right.archivedAt ?? '') - stampOf(left.archivedAt ?? '')
+      || left.title.localeCompare(right.title))
+}
+
+/**
+ * Conversations archived on their own, newest activity first.
+ *
+ * A conversation inside an archived block is deliberately left out: it is
+ * restored with the block, not from the "Archived conversations" group.
+ * @param state - the map.
+ * @param workspaceId - the Workspace whose archive is listed.
+ * @returns the independently archived conversations of that Workspace.
+ */
+export function archivedLooseThreadsOf(state: MapState, workspaceId: string): ThreadRef[] {
+  const wanted = ownerOf(workspaceId)
+  return newestFirst(state.threads.filter(thread =>
+    isArchivedThread(thread)
+    && ownerOf(thread.workspaceId) === wanted
+    && (thread.nodeId === null || !inArchive(state, thread.nodeId))))
+}
+
+/**
+ * How much one Workspace has stored in its archive.
+ *
+ * `nodes` counts archived block roots; `sessions` counts the conversations filed
+ * anywhere inside those blocks plus the ones archived on their own — the number
+ * the archive row shows.
+ * @param state - the map.
+ * @param workspaceId - the Workspace to measure.
+ * @returns the archived topic and conversation counts.
+ */
+export function archiveStatsOf(state: MapState, workspaceId: string): { nodes: number; sessions: number } {
+  const wanted = ownerOf(workspaceId)
+  const roots = archivedRootsOf(state, workspaceId)
+  const block = new Set<string>()
+  for (const root of roots) {
+    for (const id of descendantIds(state, root.id)) block.add(id)
+  }
+  const sessions = state.threads.filter(thread => {
+    if (thread.nodeId !== null && block.has(thread.nodeId)) return true
+    return isArchivedThread(thread) && ownerOf(thread.workspaceId) === wanted
+  }).length
+  return { nodes: roots.length, sessions }
+}
+
+/**
+ * How much the whole document has stored in its archive.
+ *
+ * The Host reads this for `map_get_state`: the model tools never see archived
+ * content, only these counts, so they can tell "it was put away" from "it is
+ * gone".
+ * @param state - the map.
+ * @returns the archived topic and conversation counts.
+ */
+export function archiveStats(state: MapState): { nodes: number; sessions: number } {
+  let nodes = 0
+  for (const node of state.nodes) if (isArchivedNode(node)) nodes += 1
+  const hidden = archivedNodeIds(state)
+  const sessions = state.threads.filter(thread =>
+    isArchivedThread(thread) || (thread.nodeId !== null && hidden.has(thread.nodeId))).length
+  return { nodes, sessions }
+}
+
+/** Root topics of one Workspace that are not archived, in display order. */
+export function activeTopNodesOf(state: MapState, workspaceId: string | null): MapNode[] {
+  return topNodesOf(state, workspaceId).filter(node => !isArchivedNode(node))
+}
+
+/** Direct children of one parent that are not archived, in display order. */
+export function activeChildrenOf(state: MapState, parentId: string | null): MapNode[] {
+  return childrenOf(state, parentId).filter(node => !isArchivedNode(node))
+}
+
+/** Conversations filed under one topic that are not archived, newest first. */
+export function activeThreadsOf(state: MapState, nodeId: string): ThreadRef[] {
+  return threadsOf(state, nodeId).filter(thread => !isArchivedThread(thread))
+}
+
+/** Conversations directly under one Workspace that are not archived, newest first. */
+export function activeDirectThreadsOf(state: MapState, workspaceId: string | null): ThreadRef[] {
+  return directThreadsOf(state, workspaceId).filter(thread => !isArchivedThread(thread))
+}
+
+/**
+ * The document without its archived content.
+ *
+ * The Host half projects `map_get_state`, node/Workspace counts, and search
+ * candidates from this view, so filtering happens once at the data entry instead
+ * of at every render site. Archived blocks leave as a whole — their descendants
+ * and filed conversations leave with them — while independently archived
+ * conversations are dropped on their own.
+ * @param state - the map.
+ * @returns a view with active nodes and conversations only; other fields shared.
+ */
+export function activeMapView(state: MapState): MapState {
+  const hidden = archivedNodeIds(state)
+  return {
+    ...state,
+    nodes: state.nodes.filter(node => !hidden.has(node.id)),
+    threads: state.threads.filter(thread =>
+      !isArchivedThread(thread) && (thread.nodeId === null || !hidden.has(thread.nodeId))),
+  }
+}
+
+/**
+ * The archived blocks whose original place is inside one topic's subtree.
+ *
+ * Archiving a child before its parent used to leave the two blocks side by side:
+ * the child was already detached when the parent was archived, so the parent's
+ * block no longer contained it. A block is supposed to travel as one thing, so
+ * before archiving the topic every independently archived root whose remembered
+ * parent chain leads back into the topic's current subtree is folded home first.
+ *
+ * The remembered parent chain is the original lineage: an archived root's
+ * `archivedParentId` may name an active node (that is the anchor), another
+ * archived root (keep climbing), or nothing (the item was a Workspace root and is
+ * not part of any block). A chain that repeats a node is dirty data; it is left
+ * alone as an independent archived item instead of being rebuilt into a cycle.
+ * @param state - the map.
+ * @param nodeId - the topic about to be archived.
+ * @param workspaceId - the Workspace the topic belongs to.
+ * @returns chains of archived nodes to restore, topmost first, each ending at
+ *   the archived root that has to rejoin the block.
+ */
+function archivedChainsInside(state: MapState, nodeId: string, workspaceId: string | null): MapNode[][] {
+  const byId = new Map(state.nodes.map(node => [node.id, node]))
+  const inside = descendantIds(state, nodeId)
+  const chains: MapNode[][] = []
+  for (const root of state.nodes) {
+    if (root.id === nodeId || root.parentId !== null || !isArchivedNode(root)) continue
+    // A block can only rejoin the tree it was taken out of; a dirty document that
+    // points another Workspace's archive into this subtree is left alone.
+    if (ownerOf(root.workspaceId) !== workspaceId) continue
+    const chain: MapNode[] = []
+    const visited = new Set<string>([root.id])
+    let cursor = root.archivedParentId ?? null
+    let anchorId: string | null = null
+    let broken = false
+    while (cursor !== null) {
+      const parent = byId.get(cursor)
+      if (parent === undefined) {
+        broken = true
+        break
+      }
+      if (!isArchivedNode(parent)) {
+        anchorId = parent.id
+        break
+      }
+      if (visited.has(parent.id)) {
+        broken = true
+        break
+      }
+      visited.add(parent.id)
+      chain.unshift(parent)
+      cursor = parent.archivedParentId ?? null
+    }
+    if (broken || anchorId === null) continue
+    if (anchorId !== nodeId && !inside.has(anchorId)) continue
+    chains.push([...chain, root])
+  }
+  return chains
+}
+
+/**
+ * Archive one topic together with its whole block.
+ *
+ * The topic is detached from the tree (`parentId → null`) and remembers the
+ * parent it came from; its descendants and conversations travel with it without
+ * marks of their own, and any mark they carried is absorbed — a block is
+ * archived, restored, and deleted as one thing. `workspaceId`, `position`, and
+ * `updatedAt` are untouched: archiving does not move the topic out of its
+ * Workspace, and it is not an edit.
+ *
+ * Blocks archived earlier but originally inside this subtree are folded home
+ * first (see {@link archivedChainsInside}): archiving the parent of an already
+ * archived child must absorb that child's block, not leave two parallel archive
+ * roots. That also keeps the invariant that an archived root's remembered parent
+ * is not itself still archived.
+ *
+ * Idempotent: a topic already in the archive (itself or below an archived block
+ * root) is returned as the same state, so a double click cannot rewrite the
+ * remembered parent.
+ * @param state - the map.
+ * @param nodeId - the block root to archive.
+ * @returns the updated map.
+ */
+export function archiveNode(state: MapState, nodeId: string): MapState {
+  const node = requireNode(state, nodeId)
+  if (workspaceOfNode(node) === null) throw new MapError('WORKSPACE', 'Only topics inside a Workspace can be archived.')
+  if (inArchive(state, nodeId)) return state
+  const chains = archivedChainsInside(state, nodeId, workspaceOfNode(node))
+  const now = new Date().toISOString()
+  return mutate(state, draft => {
+    // Fold the detached blocks back into the lineage before the block is read,
+    // so `descendantIds` below sees them as part of the topic's subtree.
+    for (const chain of chains) {
+      for (const folded of chain) {
+        const target = draft.nodes.find(candidate => candidate.id === folded.id)
+        if (target === undefined) continue
+        target.parentId = folded.archivedParentId ?? null
+        delete target.archivedAt
+        delete target.archivedParentId
+      }
+    }
+    const root = draft.nodes.find(candidate => candidate.id === nodeId)
+    if (root === undefined) return
+    const block = descendantIds(draft, nodeId)
+    root.archivedAt = now
+    root.archivedParentId = root.parentId
+    root.parentId = null
+    for (const member of draft.nodes) {
+      if (member.id === nodeId || !block.has(member.id)) continue
+      // A hand-built document may carry a mark on a descendant; the block's own
+      // mark replaces it, and N1 (marks only on detached roots) holds again.
+      delete member.archivedAt
+      delete member.archivedParentId
+    }
+    for (const thread of draft.threads) {
+      // Conversations inside the block are covered by the block (N2); one that
+      // was archived on its own is absorbed rather than marked twice.
+      if (thread.nodeId === null || !block.has(thread.nodeId)) continue
+      delete thread.archivedAt
+    }
+  })
+}
+
+/**
+ * Archive one conversation on its own.
+ *
+ * Only the mark changes: `nodeId` and `workspaceId` stay, so unarchiving returns
+ * the conversation to the topic it came from. A conversation that already
+ * belongs to an archived block cannot be archived again — the block owns it, and
+ * its removal would be undone the next time the block is restored.
+ * @param state - the map.
+ * @param sessionId - the conversation to archive.
+ * @returns the updated map.
+ */
+export function archiveThread(state: MapState, sessionId: string): MapState {
+  const thread = threadOfSession(state, sessionId)
+  if (thread === undefined) throw new MapError('NO_THREAD', 'That conversation no longer exists; refresh and try again.')
+  if (ownerOf(thread.workspaceId) === null) throw new MapError('WORKSPACE', 'Only conversations inside a Workspace can be archived.')
+  if (isArchivedThread(thread)) return state
+  if (thread.nodeId !== null && inArchive(state, thread.nodeId)) {
+    throw new MapError('ARCHIVED', 'The conversation already belongs to an archived topic.')
+  }
+  const now = new Date().toISOString()
+  return mutate(state, draft => {
+    const target = draft.threads.find(candidate => candidate.sessionId === sessionId)
+    if (target !== undefined) target.archivedAt = now
+  })
+}
+
+/**
+ * The parent a restored block root returns under, or `null` for the Workspace
+ * top level.
+ *
+ * The remembered parent only counts while it exists, is active (a parent that is
+ * still archived is released by {@link restoreArchivedNode} before this runs),
+ * lives in the same Workspace, is not inside the restored subtree, and leaves
+ * the subtree within the depth ceiling.
+ * @param state - the map.
+ * @param node - the archived block root being restored.
+ * @param workspaceId - the Workspace the block belongs to.
+ * @returns the parent id to use, or `null` for the top level.
+ */
+function restoredParentOf(state: MapState, node: MapNode, workspaceId: string | null): string | null {
+  const storedParentId = node.archivedParentId ?? null
+  if (storedParentId === null) return null
+  const parent = state.nodes.find(candidate => candidate.id === storedParentId)
+  if (parent === undefined || parent.id === node.id) return null
+  if (inArchive(state, parent.id)) return null
+  if (workspaceOfNode(parent) !== workspaceId) return null
+  if (descendantIds(state, node.id).has(parent.id)) return null
+  if (depthOf(state, parent.id) + heightOf(state, node.id) > MAX_DEPTH) return null
+  return parent.id
+}
+
+/**
+ * The positions a restored topic and its destination's children take.
+ *
+ * The topic goes back to the slot its original `position` named, clamped to the
+ * destination's current children, and those children are renumbered around it.
+ * Restoring therefore puts the sibling order back instead of shoving the topic to
+ * the end of the list it came from. Archived roots are not active siblings and
+ * are left out.
+ * @param state - the map.
+ * @param node - the archived block root being restored.
+ * @param parentId - the destination parent; `null` = the Workspace top level.
+ * @param workspaceId - the Workspace the block belongs to.
+ * @returns node id → new 1-based position.
+ */
+function restoredPositions(
+  state: MapState,
+  node: MapNode,
+  parentId: string | null,
+  workspaceId: string | null,
+): Map<string, number> {
+  const siblings = sorted(state.nodes.filter(candidate =>
+    candidate.id !== node.id
+    && candidate.parentId === parentId
+    && ownerOf(candidate.workspaceId) === ownerOf(workspaceId)
+    && !isArchivedNode(candidate)))
+  const wanted = Number.isFinite(node.position) ? node.position - 1 : siblings.length
+  const index = Math.max(0, Math.min(siblings.length, Math.floor(wanted)))
+  const ordered = [...siblings.slice(0, index), node, ...siblings.slice(index)]
+  return new Map(ordered.map((candidate, position) => [candidate.id, position + 1]))
+}
+
+/**
+ * Restore one archived topic to the tree.
+ *
+ * The remembered parent wins when it is still usable; otherwise the topic
+ * returns to the top of its Workspace. The restored topic takes the sibling slot
+ * its original `position` named rather than jumping to the end, so a restore puts
+ * the tree back the way it read before the archive.
+ *
+ * A remembered parent that is itself still archived is restored first: archiving
+ * a child before its parent used to leave two independent blocks, and restoring
+ * the child alone would silently flatten the lineage. Only an archived block root
+ * can be restored — a topic inside a block comes back with the block.
+ * @param state - the map.
+ * @param nodeId - the archived block root to restore.
+ * @returns the updated map.
+ */
+export function unarchiveNode(state: MapState, nodeId: string): MapState {
+  return restoreArchivedNode(state, nodeId, new Set<string>())
+}
+
+/**
+ * Restore one block root, releasing the archived block that holds its remembered
+ * parent first.
+ *
+ * `restoring` is the cycle guard: dirty documents can record two archived roots
+ * as each other's remembered parent, and that must not recurse forever. When a
+ * remembered parent is still archived after the cascade (the loop case), it is
+ * treated as unavailable and the topic falls back to the Workspace top level,
+ * exactly like a deleted parent. Restoring the same root twice inside one
+ * cascade is a no-op.
+ */
+function restoreArchivedNode(state: MapState, nodeId: string, restoring: Set<string>): MapState {
+  const node = requireNode(state, nodeId)
+  if (!isArchivedNode(node)) throw new MapError('NOT_ARCHIVED', 'That topic is not archived; there is nothing to restore.')
+  if (restoring.has(nodeId)) return state
+  restoring.add(nodeId)
+  let working = state
+  const storedParentId = node.archivedParentId ?? null
+  if (storedParentId !== null) {
+    const storedParent = working.nodes.find(candidate => candidate.id === storedParentId)
+    const archivedAncestor = storedParent === undefined ? undefined : archivedRootOf(working, storedParent.id)
+    if (archivedAncestor !== undefined && archivedAncestor.id !== nodeId) {
+      working = restoreArchivedNode(working, archivedAncestor.id, restoring)
+    }
+  }
+  const current = working.nodes.find(candidate => candidate.id === nodeId)
+  // Dirty data can nest the restored root inside the block the cascade released.
+  if (current === undefined || !isArchivedNode(current)) return working
+  const workspaceId = workspaceOfNode(current)
+  const parentId = restoredParentOf(working, current, workspaceId)
+  const positions = restoredPositions(working, current, parentId, workspaceId)
+  return mutate(working, draft => {
+    for (const target of draft.nodes) {
+      const position = positions.get(target.id)
+      if (position !== undefined) target.position = position
+    }
+    const restored = draft.nodes.find(candidate => candidate.id === nodeId)
+    if (restored === undefined) return
+    restored.parentId = parentId
+    delete restored.archivedAt
+    delete restored.archivedParentId
+  })
+}
+
+/**
+ * Restore one independently archived conversation.
+ *
+ * Only the mark is cleared: its `nodeId` still names the topic it was filed
+ * under, so it reappears exactly where it was archived from. A conversation
+ * archived as part of a topic block is restored by unarchiving the block.
+ * @param state - the map.
+ * @param sessionId - the conversation to restore.
+ * @returns the updated map.
+ */
+export function unarchiveThread(state: MapState, sessionId: string): MapState {
+  const thread = threadOfSession(state, sessionId)
+  if (thread === undefined) throw new MapError('NO_THREAD', 'That conversation no longer exists; refresh and try again.')
+  if (!isArchivedThread(thread)) throw new MapError('NOT_ARCHIVED', 'That conversation is not archived; there is nothing to restore.')
+  return mutate(state, draft => {
+    const target = draft.threads.find(candidate => candidate.sessionId === sessionId)
+    if (target !== undefined) delete target.archivedAt
+  })
+}
+
+/**
+ * The row one conversation is filed under, as plain data.
+ *
+ * This is the single source of truth for the tree's position: a conversation
+ * filed under a topic belongs to that topic; one filed directly under a
+ * Workspace belongs to the Workspace row; one archived on its own is reached
+ * through its Workspace's archive row; and an ungrouped conversation belongs to
+ * its space's ungrouped row. A stale index may still name a deleted topic, so
+ * the topic only wins while it exists.
+ *
+ * It lives in the model rather than in `session-home.ts` because both the tree's
+ * position and the composer-side home line need the same answer, and that policy
+ * module already imports this one (one row, two readers, no second rule).
+ * @param state - the map.
+ * @param sessionId - the conversation, or null for "nothing open".
+ * @returns its home row, or undefined when the index does not know the conversation.
+ */
+export function sessionHomeRow(
+  state: MapState,
+  sessionId: string | null,
+): { spaceId: string; selection: string; nodeId: string | null; workspaceId: string | null } | undefined {
+  if (sessionId === null) return undefined
+  const thread = threadOfSession(state, sessionId)
+  if (thread === undefined) return undefined
+  const spaceId = spaceOfThread(state, thread)
+  const workspaceId = ownerOf(thread.workspaceId)
+  // A conversation archived on its own is reached through its Workspace's
+  // archive row; one that travelled with an archived topic keeps that topic as
+  // its home, so the chain reads `工作区 → 已归档 → 主题`.
+  if (isArchivedThread(thread) && (thread.nodeId === null || !inArchive(state, thread.nodeId))) {
+    return workspaceId === null
+      ? { spaceId, selection: looseRowKey(state, spaceId), nodeId: null, workspaceId: null }
+      : { spaceId, selection: archiveKey(workspaceId), nodeId: null, workspaceId }
+  }
+  if (thread.nodeId !== null) {
+    const node = state.nodes.find(candidate => candidate.id === thread.nodeId)
+    if (node !== undefined) {
+      return { spaceId, selection: node.id, nodeId: node.id, workspaceId: workspaceId ?? null }
+    }
+  }
+  if (workspaceId !== null) {
+    return { spaceId, selection: workspaceKey(workspaceId), nodeId: null, workspaceId }
+  }
+  return { spaceId, selection: looseRowKey(state, spaceId), nodeId: null, workspaceId: null }
+}
+
+/**
+ * The row selection a conversation makes active.
+ *
+ * Reading a conversation inside the map means being at its home (see
+ * {@link sessionHomeRow}); the tree's position is derived from it. An ungrouped
+ * conversation resolves to its space's ungrouped row rather than "no selection":
+ * the tree has to show where the conversation really is, and leaving the reader
+ * in an unrelated branch is the one thing this rule exists to prevent.
  * @param state - the map.
  * @param thread - the conversation that was opened.
- * @returns the selection key to activate, or null when there is nothing to activate.
+ * @returns the row key to activate, or null when the index does not know it.
  */
 export function selectionOfThread(state: MapState, thread: ThreadRef): string | null {
-  if (thread.nodeId !== null && state.nodes.some(node => node.id === thread.nodeId)) return thread.nodeId
-  const workspaceId = ownerOf(thread.workspaceId)
-  return workspaceId === null ? null : workspaceKey(workspaceId)
+  return sessionHomeRow(state, thread.sessionId)?.selection ?? null
 }
 
 /**
@@ -735,8 +1315,9 @@ export function selectionOfThread(state: MapState, thread: ThreadRef): string | 
  * Native navigation (a sidebar row, a shortcut, another plugin) arrives with a
  * Session identity; the map has to land on the same place instead of keeping an
  * unrelated strip of columns on screen. A Session the index already files is
- * located by its thread — the topic it is filed under, its Workspace row, or the
- * ungrouped row of its own space. One the index has not seen yet is located by
+ * located by its thread — the topic it is filed under, the archive row of the
+ * Workspace when it was archived on its own, its Workspace row, or the ungrouped
+ * row of its own space. One the index has not seen yet is located by
  * the Host's Workspace accounting; an unknown Session with no Workspace has no
  * place to land and returns `undefined`.
  *
@@ -755,11 +1336,8 @@ export function homeOfSession(
   sessionId: string,
   workspaceId?: string | null,
 ): { spaceId: string; selection: string } | undefined {
-  const thread = threadOfSession(state, sessionId)
-  if (thread !== undefined) {
-    const spaceId = spaceOfThread(state, thread)
-    return { spaceId, selection: selectionOfThread(state, thread) ?? looseRowKey(state, spaceId) }
-  }
+  const row = sessionHomeRow(state, sessionId)
+  if (row !== undefined) return { spaceId: row.spaceId, selection: row.selection }
   if (workspaceId === undefined) return undefined
   if (workspaceId === null) {
     return { spaceId: state.defaultSpaceId, selection: looseRowKey(state, state.defaultSpaceId) }
@@ -799,6 +1377,11 @@ export function createNode(
   let workspaceId: string | null
   if (input.parentId !== null) {
     const parent = requireNode(state, input.parentId)
+    // The archive does not grow: a topic is put away with its block and comes
+    // back as a whole, so nothing may be created under an archived parent.
+    if (inArchive(state, parent.id)) {
+      throw new MapError('ARCHIVED', 'The parent topic is archived; unarchive it first.')
+    }
     workspaceId = workspaceOfNode(parent)
     if (input.workspaceId !== undefined && ownerOf(input.workspaceId) !== workspaceId) {
       throw new MapError('WORKSPACE', 'A child topic must live in the same Workspace as its parent.')
@@ -857,8 +1440,9 @@ export interface MoveIssue {
  * This is the one judgement the model, the Web UI, and the model tools share:
  * {@link moveNode} throws exactly the issue this returns, and a drag hit test can
  * ask without touching the document. Issues are reported in the order a caller
- * meets them — missing node, then a missing or foreign target parent, then the
- * cycle the re-parent would create, and finally the depth ceiling.
+ * meets them — missing node, then a node or target parent in the archive, then a
+ * missing or foreign target parent, then the cycle the re-parent would create,
+ * and finally the depth ceiling.
  * @param state - the map.
  * @param id - the node to move.
  * @param parentId - the target parent; `null` = the Workspace root.
@@ -867,10 +1451,14 @@ export interface MoveIssue {
 export function moveNodeIssue(state: MapState, id: string, parentId: string | null): MoveIssue | null {
   const node = state.nodes.find(candidate => candidate.id === id)
   if (node === undefined) return { code: 'NOT_FOUND', message: 'The target node no longer exists; refresh and try again.' }
+  // Entering and leaving the archive is only ever the archive/unarchive action:
+  // a drag must not be able to move something in or out of a block.
+  if (inArchive(state, id)) return { code: 'ARCHIVED', message: 'The topic is archived; unarchive it first.' }
   const workspaceId = workspaceOfNode(node)
   if (parentId !== null) {
     const parent = state.nodes.find(candidate => candidate.id === parentId)
     if (parent === undefined) return { code: 'NOT_FOUND', message: 'The target node no longer exists; refresh and try again.' }
+    if (inArchive(state, parent.id)) return { code: 'ARCHIVED', message: 'The target topic is archived; unarchive it first.' }
     if (workspaceOfNode(parent) !== workspaceId) {
       return { code: 'WORKSPACE', message: 'A node cannot move under a node of a different Workspace.' }
     }
@@ -940,6 +1528,12 @@ export function insertNodeBefore(
   if (beforeNodeId !== undefined && anchor === undefined) {
     throw new MapError('ANCHOR', 'The anchor node is not under the target parent.')
   }
+  // The destination parent is already known to be active, so an archived anchor
+  // can only come from a hand-built document; it is still refused rather than
+  // letting a drop re-order the active tree around a stored block.
+  if (anchor !== undefined && inArchive(state, anchor.id)) {
+    throw new MapError('ARCHIVED', 'The anchor topic is archived; unarchive it first.')
+  }
   // `insertBefore(x, x)` keeps x exactly where it is: nothing to recompute.
   if (anchor !== undefined && anchor.id === id) return state
 
@@ -972,10 +1566,62 @@ export function insertNodeBefore(
 export function deleteNode(state: MapState, id: string): MapState {
   requireNode(state, id)
   if (state.nodes.some(node => node.parentId === id)) throw new MapError('HAS_CHILDREN', 'Move or delete the child topics first.')
+  return deleteNodeSubtree(state, id)
+}
+
+/**
+ * Delete one node together with every node below it.
+ *
+ * A conversation is never deleted here: one filed under any removed node is
+ * left in the index with `nodeId: null`, exactly as {@link deleteNode} does for
+ * a leaf, so the map keeps showing it directly under its Workspace row (or in
+ * the space's ungrouped bucket for a rootless topic). Deleting inside the
+ * archive is the one exception: the freed conversations stay archived, becoming
+ * top-level archived conversations, because a cleanup of old topics must not
+ * spill stale conversations back into the active tree. The whole subtree leaves
+ * in one revision bump, which is what lets the UI confirm one action and remove
+ * every level at once.
+ * @param state - the map.
+ * @param id - the subtree root to remove.
+ * @returns the updated map.
+ */
+export function deleteNodeSubtree(state: MapState, id: string): MapState {
+  const node = requireNode(state, id)
+  const doomed = descendantIds(state, id)
+  const keepArchived = workspaceOfNode(node) !== null && inArchive(state, id)
+  const now = keepArchived ? new Date().toISOString() : ''
   return mutate(state, draft => {
-    draft.nodes = draft.nodes.filter(node => node.id !== id)
-    for (const thread of draft.threads) if (thread.nodeId === id) thread.nodeId = null
+    draft.nodes = draft.nodes.filter(node => !doomed.has(node.id))
+    for (const thread of draft.threads) {
+      if (thread.nodeId === null || !doomed.has(thread.nodeId)) continue
+      thread.nodeId = null
+      // A conversation that was archived on its own already carries the mark;
+      // one that only lived inside the block gains it now that the block is
+      // gone, so it does not resurface in the active tree.
+      if (keepArchived && !isArchivedThread(thread)) thread.archivedAt = now
+    }
   })
+}
+
+/**
+ * What deleting one subtree would remove, for the confirmation copy.
+ *
+ * `nodes` counts the descendants below the target (the copy reads "n more nodes
+ * below it"), not the target itself. Counts are read from the index, so a
+ * conversation the map has never seen is not counted — it could not have been
+ * filed under a node either. An unknown id yields zeros instead of throwing:
+ * the dialog may render one tick after another writer removed the node.
+ * @param state - the map.
+ * @param id - the subtree root.
+ * @returns the descendant-node and filed-conversation counts.
+ */
+export function subtreeDeletionSummary(state: MapState, id: string): { nodes: number; conversations: number } {
+  const doomed = descendantIds(state, id)
+  let conversations = 0
+  for (const thread of state.threads) {
+    if (thread.nodeId !== null && doomed.has(thread.nodeId)) conversations += 1
+  }
+  return { nodes: Math.max(doomed.size - 1, 0), conversations }
 }
 
 /**
@@ -984,7 +1630,9 @@ export function deleteNode(state: MapState, id: string): MapState {
  *
  * Mirrors what {@link assignThreads} enforces and adds the subagent refusal the
  * model was missing: a child Session is reached from its parent conversation, so
- * the map gives it no row and filing one under a node is meaningless. An
+ * the map gives it no row and filing one under a node is meaningless. Archived
+ * conversations and archived target topics are refused as well — the archive is
+ * entered and left only through its own actions. An
  * unaccounted conversation (`workspaceId === undefined`) and one the index has
  * never seen stay permissive — there is nothing to file yet.
  * @param state - the map.
@@ -1000,6 +1648,17 @@ export function assignThreadIssue(state: MapState, sessionId: string, nodeId: st
   // under a node either: it is reached from its parent conversation instead.
   if (thread?.origin === 'subagent' || isRecordedSubagent(state, sessionId)) {
     return { code: 'SUBAGENT', message: 'A subagent conversation cannot be filed under a topic.' }
+  }
+  // The archive is not a drag destination either: an archived conversation only
+  // leaves through 「取消归档」, and an archived topic only receives the block it
+  // already owns. A conversation filed inside an archived block carries no mark
+  // of its own (N2), so being below a marked ancestor counts as archived too.
+  if (thread !== undefined
+    && (isArchivedThread(thread) || (thread.nodeId !== null && inArchive(state, thread.nodeId)))) {
+    return { code: 'ARCHIVED', message: 'The conversation is archived; unarchive it first.' }
+  }
+  if (node !== undefined && inArchive(state, node.id)) {
+    return { code: 'ARCHIVED', message: 'The target topic is archived; unarchive it first.' }
   }
   if (thread === undefined || thread.workspaceId === undefined || node === undefined) return null
   const nodeWorkspace = workspaceOfNode(node)
@@ -1046,7 +1705,8 @@ export function assignThreads(state: MapState, sessionIds: readonly string[], no
 /**
  * Merge the visible conversation catalog into the index, preserving ownership.
  * New conversations are filed under the Workspace the Host accounts them to;
- * existing ones keep their topic and refresh their title.
+ * a conversation created by branching is filed beside the conversation it
+ * branched from; existing ones keep their topic and refresh their title.
  *
  * Visibility is applied here rather than by the caller because this is also
  * where a subagent child becomes a durable fact: the child is recorded in
@@ -1069,6 +1729,18 @@ export function syncThreads(
     const byId = new Map(draft.threads.map(thread => [thread.sessionId, thread]))
     const recorded = new Set(draft.subagentSessionIds ?? [])
     const now = new Date().toISOString()
+    /**
+     * Rows this pass created for a Session that names a source conversation.
+     *
+     * A fork is an ordinary conversation with a `parentId` (subagent children
+     * were filtered out above), and the native branch action opens the child
+     * immediately — so the reader expects it where its source lives, not at the
+     * Workspace root. The inheritance itself runs after the whole catalog has
+     * been read: the source may be another row this very pass creates, in any
+     * order, and only rows created here may inherit (a row the map already files
+     * keeps whatever topic the reader gave it).
+     */
+    const branched = new Map<string, { thread: ThreadRef; from: string }>()
     for (const session of sessions) {
       // Record before deciding visibility: a subagent child is exactly the row
       // that will never be stored, so this is the only chance to keep the fact.
@@ -1094,6 +1766,12 @@ export function syncThreads(
         if (session.origin !== undefined) created.origin = session.origin
         draft.threads.push(created)
         byId.set(session.id, created)
+        // A missing, empty, or self-referencing parent is not a source: it must
+        // not become a destination the row can never inherit from.
+        const from = session.parentId
+        if (typeof from === 'string' && from !== '' && from !== session.id) {
+          branched.set(session.id, { thread: created, from })
+        }
         continue
       }
       existing.title = title
@@ -1101,6 +1779,41 @@ export function syncThreads(
       if (owned !== undefined) existing.workspaceId = owned
       if (session.origin !== undefined) existing.origin = session.origin
     }
+    // Resolve the new branches parent-first. `placed` makes the walk linear, and
+    // `path` breaks a malformed parent chain instead of recursing forever.
+    const placed = new Set<string>()
+    const placeBranch = (sessionId: string, path: Set<string>): void => {
+      const branch = branched.get(sessionId)
+      if (branch === undefined || placed.has(sessionId) || path.has(sessionId)) return
+      path.add(sessionId)
+      // The source can be a row this same pass created; place it first so the
+      // child inherits the final answer rather than the blank starting point.
+      if (branched.has(branch.from)) placeBranch(branch.from, path)
+      path.delete(sessionId)
+      placed.add(sessionId)
+      const source = byId.get(branch.from)
+      if (source === undefined) return
+      const target = branch.thread
+      // The Host attaches a fork to its source's Workspace, but the Workspace
+      // list can lag the catalog by one snapshot. Inheriting the source's owner
+      // keeps the topic below from being dropped by the reconciliation that
+      // follows, without ever overriding an owner the Host did report.
+      if (target.workspaceId === undefined && source.workspaceId !== undefined) {
+        target.workspaceId = source.workspaceId
+      }
+      const owner = ownerOf(target.workspaceId)
+      if (target.nodeId === null && source.nodeId !== null) {
+        const node = draft.nodes.find(candidate => candidate.id === source.nodeId)
+        // A topic only ever holds conversations of its own Workspace.
+        if (node !== undefined && ownerOf(node.workspaceId) === owner) target.nodeId = node.id
+      }
+      // A loose conversation is held by its source's plugin-local space; the
+      // legacy rootless bucket is the default space, which needs no field.
+      if (owner === null && target.spaceId === undefined && source.spaceId !== undefined) {
+        target.spaceId = source.spaceId
+      }
+    }
+    for (const sessionId of branched.keys()) placeBranch(sessionId, new Set())
   })
 }
 
@@ -1200,12 +1913,13 @@ export function indexableSessions(sessions: readonly SessionSummaryLike[], openS
  * Nearest ancestor conversation the map gives a row to.
  *
  * A subagent child is located by its parent's row, never by itself. A row the
- * catalog does not know, a missing or empty parent pointer, and a cyclic parent
- * chain all stop the walk at the last conversation it could name, so the caller
- * never loops and never invents an ancestor.
+ * catalog does not know, and a missing or empty parent pointer, stop the walk at
+ * the last conversation it could name; a cyclic parent chain ends it on the
+ * conversation the walk started from. Either way the caller never loops and
+ * never invents an ancestor.
  * @param byId - catalog rows by session id, as the client holds them.
  * @param sessionId - the Session to resolve.
- * @returns the id of the nearest visible ancestor, or the last id the walk could reach.
+ * @returns the id of the nearest visible ancestor, or the id the walk had to stop on.
  */
 export function visibleAncestorOf(
   byId: Readonly<Record<string, { origin?: string; parentId?: string | null } | undefined>>,
@@ -1241,11 +1955,21 @@ function membershipOf(workspaces: readonly WorkspaceRef[]): Map<string, string> 
  *    into the Workspace its own conversations live in (title/path as the
  *    fallback), and inherited by its children. A topic whose Workspace was
  *    deleted moves to the ungrouped bucket instead of disappearing.
- * 2. Every conversation takes the Workspace the Host accounts it to. A
- *    conversation that is no longer a member of its topic's Workspace leaves
- *    that topic, so the map never shows it twice or in the wrong group.
+ *    Conversations take the Workspace the Host accounts them to; one whose
+ *    recorded owner names a Workspace the Host no longer reports is released to
+ *    `null` instead of staying invisible under a stale id.
+ * 2. Archived content whose Workspace is gone leaves the archive: the "Archived"
+ *    row lives inside a Workspace, so without it the content would be both
+ *    hidden and unreachable. A topic returns under its remembered parent when
+ *    that node still exists on the same (now ungrouped) side, and to the top
+ *    level otherwise; conversations become ordinary ungrouped conversations.
  * 3. Aliases are normalized: `undefined` becomes the concrete owner, so the
- *    document persists a stable shape.
+ *    document persists a stable shape, and the released archive marks are
+ *    cleared.
+ *
+ * Every step is idempotent, and the order is fixed: ownership is decided before
+ * the archive is released, because "whose Workspace is this?" is what decides
+ * whether an item has to leave the archive at all.
  * @param state - the map.
  * @param workspaces - the Host's Workspace rows, in Host order.
  * @returns the reconciled map, or the same object when nothing changed.
@@ -1318,20 +2042,117 @@ export function reconcileWorkspaces(state: MapState, workspaces: readonly Worksp
   }
 
   let changed = false
-  const nodes = state.nodes.map(node => {
+
+  // Step 1 — owners. An archived block is detached, so its own `workspaceId` is
+  // the whole answer; a descendant still inherits through its parent chain.
+  const owned = state.nodes.map(node => {
     const owner = resolve(node.id, new Set<string>())
     if (owner === ownerOf(node.workspaceId)) return node
     changed = true
     return { ...node, workspaceId: owner }
   })
+  const ownedById = new Map(owned.map(node => [node.id, node]))
+
+  // Step 2 — release archived items that no longer have a Workspace row to be
+  // shown under. A Workspace that still exists keeps its archive.
+  const releasing = new Set<string>()
+  for (const node of owned) {
+    if (isArchivedNode(node) && ownerOf(node.workspaceId) === null) releasing.add(node.id)
+  }
+  const releasedParent = new Map<string, string | null>()
+  for (const nodeId of releasing) {
+    const node = ownedById.get(nodeId)
+    if (node === undefined) continue
+    const wanted = node.archivedParentId ?? null
+    const candidate = wanted === null ? undefined : ownedById.get(wanted)
+    // The remembered parent can be a live topic on the same (now ungrouped)
+    // side, or another archived root this very pass is releasing. Anything else
+    // — deleted, archived for good, or of another Workspace — falls back to the
+    // top level.
+    const usable = candidate !== undefined
+      && candidate.id !== nodeId
+      && ownerOf(candidate.workspaceId) === null
+      && (!isArchivedNode(candidate) || releasing.has(candidate.id))
+    releasedParent.set(nodeId, usable ? candidate.id : null)
+  }
+  // A hand-built document may record two archived roots as each other's parent;
+  // break the loop instead of rebuilding a cycle the rest of the model cannot
+  // walk. The repeated node is the one closing the loop, so its own link is the
+  // one to drop — a chain that merely runs into a loop stays attached.
+  for (const nodeId of releasing) {
+    const seen = new Set<string>([nodeId])
+    let cursor = releasedParent.get(nodeId) ?? null
+    while (cursor !== null && releasing.has(cursor)) {
+      if (seen.has(cursor)) {
+        releasedParent.set(cursor, null)
+        break
+      }
+      seen.add(cursor)
+      cursor = releasedParent.get(cursor) ?? null
+    }
+  }
+  // Released topics are appended after the destination's current children, in
+  // document order.
+  const released = new Map<string, { parentId: string | null; position: number }>()
+  if (releasing.size > 0) {
+    let topNext = 1
+    for (const node of owned) {
+      if (node.parentId === null && ownerOf(node.workspaceId) === null && !releasing.has(node.id)) {
+        topNext = Math.max(topNext, node.position + 1)
+      }
+    }
+    const childNext = new Map<string, number>()
+    for (const node of owned) {
+      if (!releasing.has(node.id)) continue
+      const parentId = releasedParent.get(node.id) ?? null
+      if (parentId === null) {
+        released.set(node.id, { parentId: null, position: topNext })
+        topNext += 1
+        continue
+      }
+      let next = childNext.get(parentId)
+      if (next === undefined) {
+        next = 1
+        for (const sibling of owned) {
+          if (sibling.parentId === parentId && !releasing.has(sibling.id)) next = Math.max(next, sibling.position + 1)
+        }
+        childNext.set(parentId, next)
+      }
+      released.set(node.id, { parentId, position: next })
+      childNext.set(parentId, next + 1)
+    }
+  }
+
+  const nodes = owned.map(node => {
+    const target = released.get(node.id)
+    if (target !== undefined) {
+      changed = true
+      const next: MapNode = { ...node, parentId: target.parentId, position: target.position }
+      delete next.archivedAt
+      delete next.archivedParentId
+      return next
+    }
+    // A stray `archivedParentId` without a mark is meaningless; drop it so the
+    // persisted shape stays canonical.
+    if (node.archivedAt === undefined && node.archivedParentId !== undefined) {
+      changed = true
+      const next: MapNode = { ...node }
+      delete next.archivedParentId
+      return next
+    }
+    return node
+  })
 
   const nodeWorkspace = new Map(nodes.map(node => [node.id, ownerOf(node.workspaceId)]))
   const threads = state.threads.map(thread => {
     const knownMember = membership.has(thread.sessionId)
+    // A stale owner (a Workspace the Host no longer reports) is released instead
+    // of kept: it would otherwise hide the conversation under a group that has
+    // no row. Membership still wins when the Host does account for the session.
     const owner = knownMember
       ? membership.get(thread.sessionId) ?? null
       : thread.workspaceId !== undefined
-        ? ownerOf(thread.workspaceId)
+        ? thread.workspaceId !== null && known.has(thread.workspaceId) ? thread.workspaceId : null
         : null
     let nodeId = thread.nodeId
     if (nodeId !== null) {
@@ -1340,10 +2161,16 @@ export function reconcileWorkspaces(state: MapState, workspaces: readonly Worksp
     }
     // A Workspace owns the conversation: its plugin-local space no longer applies.
     const spaceId = owner === null ? thread.spaceId : undefined
-    if (nodeId === thread.nodeId && owner === thread.workspaceId && spaceId === thread.spaceId) return thread
+    // Step 3 — an archived conversation whose Workspace is gone has no archive
+    // row left to be shown under, so it becomes an ordinary ungrouped
+    // conversation; a Workspace that still exists keeps its mark.
+    const archivedAt = owner === null ? undefined : thread.archivedAt
+    if (nodeId === thread.nodeId && owner === thread.workspaceId && spaceId === thread.spaceId
+      && archivedAt === thread.archivedAt) return thread
     changed = true
     const next: ThreadRef = { ...thread, nodeId, workspaceId: owner }
     if (spaceId === undefined) delete next.spaceId
+    if (archivedAt === undefined) delete next.archivedAt
     return next
   })
 
@@ -1446,6 +2273,12 @@ function readRows(
     if (typeof node.createdAt === 'string' && node.createdAt !== '') created.createdAt = node.createdAt
     const owner = keepOwner ? readOwner(node.workspaceId) : undefined
     if (owner !== undefined) created.workspaceId = owner
+    // Archive marks are plugin-local organization data, not owner accounting:
+    // they are read back verbatim in every version so a Host round trip
+    // (parse → mutate → submit) cannot silently drop a topic out of the archive.
+    if (typeof node.archivedAt === 'string' && node.archivedAt !== '') created.archivedAt = node.archivedAt
+    if (node.archivedParentId === null) created.archivedParentId = null
+    else if (typeof node.archivedParentId === 'string' && node.archivedParentId !== '') created.archivedParentId = node.archivedParentId
     return [created]
   })
   const ids = new Set(nodes.map(node => node.id))
@@ -1469,6 +2302,8 @@ function readRows(
     if (keepOwner && ownerOf(owner) === null && typeof thread.spaceId === 'string' && knownSpaces.has(thread.spaceId)) {
       created.spaceId = thread.spaceId
     }
+    // See the node read above: an archive mark must survive the round trip.
+    if (typeof thread.archivedAt === 'string' && thread.archivedAt !== '') created.archivedAt = thread.archivedAt
     return [created]
   })
   return { nodes, threads }
@@ -1626,8 +2461,10 @@ const WORKSPACE_ROOT_TARGET_LABEL = '(Workspace top level)'
  * Built for the 「移动到…」 picker: the Workspace row itself comes first (a
  * conversation can always live directly under its Workspace), then each node
  * depth-first, labelled with its full path so two same-named topics stay apart.
- * A cycle in a hand-built document cannot make the list grow — an id is emitted
- * once — and no document is touched, so a dialog can build the list per open.
+ * Topics inside the archive are left out — a conversation leaves the archive
+ * only through 「取消归档」, so they must not be drop destinations. A cycle in a
+ * hand-built document cannot make the list grow — an id is emitted once — and no
+ * document is touched, so a dialog can build the list per open.
  * @param state - the map.
  * @param workspaceId - the Workspace whose nodes are the targets; `null` = the ungrouped bucket.
  * @param workspaceRootLabel - localized label of the Workspace-row destination.
@@ -1652,6 +2489,9 @@ export function threadMoveTargets(
   const seen = new Set<string>()
   const walk = (node: MapNode): void => {
     if (seen.has(node.id)) return
+    // The archive is not a destination: a conversation enters it only through
+    // its own 「归档」 action and leaves it only through 「取消归档」.
+    if (inArchive(state, node.id)) return
     seen.add(node.id)
     targets.push({ nodeId: node.id, label: breadcrumb(state, node.id) })
     const kids = (children.get(node.id) ?? []).filter(candidate => ownerOf(candidate.workspaceId) === wanted)

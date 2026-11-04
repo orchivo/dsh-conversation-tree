@@ -17,6 +17,7 @@ export const model = {
   'model.error.HAS_CHILDREN': '请先移动或删除子节点。',
   'model.error.SUBAGENT': '子智能体会话不能挂到节点下。',
   'model.error.SPACE': '只能把默认空间的未分组对话关联到未分组主题。',
+  'model.error.ARCHIVED': '内容已归档，请先取消归档。',
   'model.error.STORE_LOADING': '对话树仍在加载，请稍后再试。',
   'model.error.PICKER_MACOS': 'macOS 上由后台进程拉起的系统目录面板无法接受点击。',
   'model.error.PICKER_MISSING': '当前客户端没有提供目录选择器。',

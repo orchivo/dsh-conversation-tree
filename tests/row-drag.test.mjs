@@ -10,9 +10,12 @@ import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
 
 import {
-  assignThreads, childrenOf, createNode, emptyMap, insertNodeBefore, syncThreads, threadsOf,
+  archiveNode, archiveThread, assignThreads, childrenOf, createNode, emptyMap, insertNodeBefore, syncThreads, threadsOf,
 } from '../lib/model.js'
-import { DRAG_THRESHOLD_PX, decideDrop, exceedsDragThreshold, formatDragLabel } from '../lib/row-drag.js'
+import {
+  GROUP_EDGE_PX, GROUP_MIN_INTO_PX, DRAG_THRESHOLD_PX, candidateFromGroupHit, decideDrop,
+  exceedsDragThreshold, formatDragLabel, hitGroupAt,
+} from '../lib/row-drag.js'
 import { createTranslator, zh } from '../lib/locales.js'
 
 /** A topic row under the pointer. */
@@ -316,4 +319,179 @@ test('the plan commits cleanly through the model', () => {
     nodePlan.action.beforeNodeId ?? undefined,
   )
   assert.deepEqual(childrenOf(state, 'a').map(node => node.id), ['a3', 'a1', 'a2'])
+})
+
+
+/* ── group-level hit testing: the block is the target, not the row ───────── */
+
+/** One column interval; groups are placed inside it by their top/bottom. */
+const COLUMN = { key: 'L2', left: 0, right: 200, top: 0, bottom: 600 }
+
+/** One group rectangle, top-aligned inside {@link COLUMN}. */
+function group(key, top, bottom, extra = {}) {
+  return {
+    key, kind: 'node', columnKey: 'L2', nodeId: key.replace('node:', ''), workspaceId: 'w1',
+    top, bottom, headerHeight: 34, ...extra,
+  }
+}
+
+/** A pointer at x=100 (inside the column) and the given y. */
+function pointAt(y, x = 100) {
+  return { x, y }
+}
+
+test('a pointer anywhere inside a group resolves to that group with into', () => {
+  const groups = [group('node:n1', 100, 250)]
+  for (const y of [100 + 20, 140, 200, 241]) {
+    const hit = hitGroupAt(pointAt(y), [COLUMN], groups)
+    assert.equal(hit.zone, 'group', `y=${String(y)} is inside the block`)
+    assert.equal(hit.group?.key, 'node:n1')
+    assert.equal(hit.mode, 'into', `y=${String(y)} means "into the topic", never a row slot`)
+  }
+})
+
+test('only the group boundaries express before/after, eight pixels deep', () => {
+  const groups = [group('node:n1', 100, 250)]
+  assert.equal(hitGroupAt(pointAt(100 + 2), [COLUMN], groups).mode, 'before', 'the top band inserts before')
+  assert.equal(hitGroupAt(pointAt(100 + GROUP_EDGE_PX), [COLUMN], groups).mode, 'into', 'the band is exactly 8px')
+  assert.equal(hitGroupAt(pointAt(250 - 2), [COLUMN], groups).mode, 'after', 'the bottom band inserts after')
+  assert.equal(hitGroupAt(pointAt(250 - GROUP_EDGE_PX - 1), [COLUMN], groups).mode, 'into', 'its floor is exact too')
+})
+
+test('a collapsed group keeps at least twelve pixels of into between its bands', () => {
+  const groups = [group('node:n3', 100, 134, { headerHeight: 34 })]
+  assert.equal(GROUP_MIN_INTO_PX, 12)
+  assert.equal(hitGroupAt(pointAt(100 + 9), [COLUMN], groups).mode, 'into', 'the first pixel past the top band is into')
+  assert.equal(hitGroupAt(pointAt(100 + 16), [COLUMN], groups).mode, 'into', 'the middle of a 34px header still files under it')
+  assert.equal(hitGroupAt(pointAt(134 - 9), [COLUMN], groups).mode, 'into', 'the last pixel before the bottom band is into')
+  assert.equal(hitGroupAt(pointAt(134 - 2), [COLUMN], groups).mode, 'after', 'the bottom band still reorders')
+})
+
+test('a workspace group has no sibling order: every y in it is into', () => {
+  const groups = [group('workspace:w1', 100, 200, { kind: 'workspace', nodeId: null })]
+  for (const y of [101, 150, 199]) {
+    assert.equal(hitGroupAt(pointAt(y), [COLUMN], groups).mode, 'into', `y=${String(y)} targets the Workspace`)
+  }
+})
+
+test('the pointer in a column\'s 6px padding still hits the group; a gutter hits none', () => {
+  const groups = [group('node:n1', 100, 250)]
+  assert.equal(hitGroupAt(pointAt(150, 1), [COLUMN], groups).group?.key, 'node:n1', 'the column padding belongs to the column')
+  assert.equal(hitGroupAt(pointAt(150, 199), [COLUMN], groups).group?.key, 'node:n1', 'the trailing padding too')
+  const gutter = hitGroupAt(pointAt(150, 260), [COLUMN], groups)
+  assert.equal(gutter.zone, 'none', 'the inter-column gutter is not a target')
+  assert.equal(gutter.group, null)
+})
+
+test('the column tail is the last group; a conversation has no target there', () => {
+  const groups = [group('node:n1', 100, 250), group('node:n4', 250, 400)]
+  const tail = hitGroupAt(pointAt(500), [COLUMN], groups)
+  assert.equal(tail.zone, 'tail', 'the blank below the last group is the append zone')
+  assert.equal(tail.group?.key, 'node:n4')
+  assert.equal(tail.mode, 'after', 'for a topic it means "append after the last group"')
+  assert.deepEqual(
+    candidateFromGroupHit(tail, { kind: 'node', nodeId: 'n2', workspaceId: 'w1' }),
+    { row: { kind: 'node', nodeId: 'n4', workspaceId: 'w1' }, edge: 'after' },
+    'a topic payload appends to the level',
+  )
+  assert.equal(
+    candidateFromGroupHit(tail, { kind: 'session', sessionId: 's1', workspaceId: 'w1' }),
+    null,
+    'a conversation has no slot to append to: no target, so a release writes nothing',
+  )
+})
+
+test('a conversation inside a group is always into, even on the reorder bands', () => {
+  const groups = [group('node:n1', 100, 250)]
+  for (const y of [100 + 2, 150, 250 - 2]) {
+    const hit = hitGroupAt(pointAt(y), [COLUMN], groups)
+    assert.equal(
+      candidateFromGroupHit(hit, { kind: 'session', sessionId: 's1', workspaceId: 'w1' }).edge,
+      'into',
+      `y=${String(y)} files the conversation under the topic; its vertical position is not a sort slot`,
+    )
+  }
+  const top = hitGroupAt(pointAt(100 + 2), [COLUMN], groups)
+  assert.equal(
+    candidateFromGroupHit(top, { kind: 'node', nodeId: 'n2', workspaceId: 'w1' }).edge,
+    'before',
+    'a topic payload on the same band does mean sibling order',
+  )
+})
+
+test('workspace and ungrouped groups map onto the candidates decideDrop already knows', () => {
+  const workspace = hitGroupAt(pointAt(150), [COLUMN], [group('workspace:w1', 100, 200, { kind: 'workspace', nodeId: null })])
+  assert.deepEqual(
+    candidateFromGroupHit(workspace, { kind: 'session', sessionId: 's1', workspaceId: 'w1' }),
+    { row: { kind: 'workspace', workspaceId: 'w1' }, edge: 'into' },
+    'a conversation lands at the Workspace root',
+  )
+  assert.deepEqual(
+    candidateFromGroupHit(workspace, { kind: 'node', nodeId: 'n2', workspaceId: 'w1' }),
+    { row: { kind: 'workspace', workspaceId: 'w1' }, edge: 'into' },
+    'a topic lands at the Workspace top level',
+  )
+
+  const ungrouped = hitGroupAt(pointAt(150), [COLUMN], [group('ungrouped:@ungrouped', 100, 200, { kind: 'ungrouped', nodeId: null, workspaceId: null })])
+  assert.deepEqual(
+    candidateFromGroupHit(ungrouped, { kind: 'node', nodeId: 'n2', workspaceId: 'w1' }),
+    { row: { kind: 'none' }, edge: 'into' },
+    'the ungrouped bucket is not a target; decideDrop refuses it',
+  )
+})
+
+test('a group hit outside every column or below an empty column has no target', () => {
+  assert.equal(hitGroupAt({ x: 100, y: 500 }, [COLUMN], []).zone, 'none', 'an empty column has no group to append to')
+  assert.equal(hitGroupAt({ x: 100, y: -10 }, [COLUMN], [group('node:n1', 100, 250)]).zone, 'none', 'above the column is no target')
+  assert.equal(
+    candidateFromGroupHit(
+      hitGroupAt(pointAt(500), [COLUMN], [group('node:n1', 100, 250)]),
+      { kind: 'node', nodeId: 'n2', workspaceId: 'w1' },
+    )?.row.kind,
+    'node',
+    'a tail hit still maps to the last group',
+  )
+})
+
+test('a topic drag states how many conversations travel with it', () => {
+  const state = seed()
+  const decision = decideDrop(state, { kind: 'node', nodeId: 'a', workspaceId: 'w1' }, into(nodeRow('b')))
+  assert.equal(decision.issue, null)
+  assert.equal(decision.label.kind, 'under')
+  assert.equal(decision.label.carried, 1, 'the conversation filed under the topic is part of the move')
+  assert.match(label(decision), /移到「产品设计」下 · 带走 1 条会话/, 'the pointer label states the cost')
+})
+
+test('the F0 regression: a topic candidate without its Workspace is refused as ungrouped', () => {
+  const state = seed()
+  const decision = decideDrop(
+    state,
+    { kind: 'session', sessionId: 's1', workspaceId: 'w1' },
+    { row: { kind: 'node', nodeId: 'a1', workspaceId: null }, edge: 'into' },
+  )
+  assert.equal(decision.issue.code, 'UNGROUPED', 'the hit test must carry the topic\'s Workspace, not only its id')
+  assert.equal(label(decision), '未分组不参与拖动')
+})
+
+test('an archived topic is neither a drag source nor a drop target', () => {
+  const state = archiveNode(seed(), 'a1')
+  const source = decideDrop(state, { kind: 'node', nodeId: 'a1', workspaceId: 'w1' }, into(workspaceRow('w1')))
+  assert.equal(source.issue.code, 'ARCHIVED', 'a put-away topic cannot be dragged back out')
+  assert.equal(source.action, null)
+  assert.equal(label(source), '「已归档」中的内容不能拖入或拖出，请用取消归档。', 'the pointer says how to leave the archive')
+
+  const target = decideDrop(state, { kind: 'node', nodeId: 'a', workspaceId: 'w1' }, into(nodeRow('a1')))
+  assert.equal(target.issue.code, 'ARCHIVED', 'the archive is not a destination either')
+  assert.equal(target.action, null)
+})
+
+test('an archived conversation cannot be dragged, and archived topics refuse it', () => {
+  const state = archiveThread(seed(), 's1')
+  const source = decideDrop(state, { kind: 'session', sessionId: 's1', workspaceId: 'w1' }, into(nodeRow('a')))
+  assert.equal(source.issue.code, 'ARCHIVED', 'the conversation only leaves through 取消归档')
+  assert.equal(source.action, null)
+  assert.equal(label(source), '「已归档」中的内容不能拖入或拖出，请用取消归档。')
+
+  const target = decideDrop(state, { kind: 'session', sessionId: 's2', workspaceId: 'w2' }, into(nodeRow('a')))
+  assert.equal(target.issue.code, 'WORKSPACE', 'cross-Workspace refusals still come first')
 })

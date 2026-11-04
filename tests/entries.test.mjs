@@ -82,12 +82,12 @@ test('a collapsed band draws the icon-only expand control', () => {
   assert.ok(markup.includes('data-target="map"'), 'the control keeps the map seat id')
   assert.ok(markup.includes('aria-label="展开对话树"'), 'the accessible name states the action')
   assert.ok(!markup.includes('cm-view-toggle-label'), 'the button carries no visible copy')
-  assert.ok(!markup.includes('cm-hint'), 'a dismissed hint stays gone')
+  assert.ok(!markup.includes('cm-seat-hint'), 'a dismissed hint stays gone')
 })
 
 test('the first reader sees the one-time hint beside the icon', () => {
   const markup = renderToStaticMarkup(createElement(MapLauncher, { collapsed: collapse(true), hint: hint(true) }))
-  assert.ok(markup.includes('cm-hint'), 'the hint is drawn while it is pending')
+  assert.ok(markup.includes('cm-seat-hint'), 'the hint is drawn while it is pending')
   assert.ok(markup.includes('展开对话树'), 'the hint names the affordance')
   assert.ok(markup.includes('aria-hidden="true"'), 'the hint is decorative: the button carries the name')
 })
@@ -429,6 +429,97 @@ test('a held completion is not repeated while its conversation is in front', () 
     useSessionStatus: selector => selector(new Map([['s1', {}]])),
   }))
   assert.ok(!markup.includes('cm-rollup'), 'the reader can see the conversation, so nothing stays unread')
+})
+
+/** The map store a sidebar archive test needs: indexed conversations and topic nodes. */
+function archiveStore(threads, nodes) {
+  return {
+    getSnapshot: () => ({ phase: 'ready', doc: { threads, nodes }, revision: 1, pending: 0 }),
+    subscribe: () => () => {},
+    update: () => ({ ok: true }),
+    refresh: async () => {},
+    load: async () => {},
+    dispose() {},
+  }
+}
+
+/** One topic node for an archive test fixture, stamped as an archive root when asked. */
+function topicNode(id, parentId = null, archived = false) {
+  return {
+    id,
+    parentId,
+    workspaceId: 'w1',
+    title: id,
+    description: '',
+    position: 0,
+    updatedAt: '2026-11-01T00:00:00.000Z',
+    ...(archived
+      ? { archivedAt: '2026-11-01T00:00:00.000Z', ...(parentId === null ? { archivedParentId: null } : {}) }
+      : {}),
+  }
+}
+
+test('the sidebar cluster leaves archived conversations out', () => {
+  const pending = { pendingInteraction: { kind: 'approval' } }
+  const ids = ['live', 'loose', 'inside', 'child']
+  const ledger = createStatusLedger({ now: () => 10 })
+  ledger.observe(new Map(ids.map(id => [id, pending])), ids)
+  const markup = renderToStaticMarkup(createElement(MapPanelIcon, {
+    collapsed: collapse(true),
+    panelInfo: panelInfo(null),
+    size: 16,
+    store: archiveStore([
+      { sessionId: 'live', nodeId: 'active', workspaceId: 'w1' },
+      // Archived on its own: the conversation is folded away, its topic is not.
+      { sessionId: 'loose', nodeId: null, workspaceId: 'w1', archivedAt: '2026-11-01T00:00:00.000Z' },
+      // The next two are archived because their topic was, at two depths.
+      { sessionId: 'inside', nodeId: 'archived-root', workspaceId: 'w1' },
+      { sessionId: 'child', nodeId: 'archived-child', workspaceId: 'w1' },
+    ], [
+      topicNode('active'),
+      topicNode('archived-root', null, true),
+      topicNode('archived-child', 'archived-root'),
+    ]),
+    statusLedger: ledger,
+    useSessions: selector => selector({
+      ids,
+      byId: Object.fromEntries(ids.map(id => [id, { displayTitle: id }])),
+    }),
+    useSessionStatus: selector => selector(new Map(ids.map(id => [id, pending]))),
+  }))
+  assert.ok(
+    markup.includes('aria-label="会话状态：1 条待响应（全部已索引会话）"'),
+    'only the active conversation is counted',
+  )
+  assert.ok(markup.includes('1 条待处理'), 'the counts name that one conversation')
+  assert.ok(!markup.includes('4 条待处理'), 'the archived conversations never reach the cluster')
+})
+
+test('archived conversations cannot keep the sidebar cluster alive', () => {
+  const pending = { pendingInteraction: { kind: 'approval' } }
+  const ids = ['loose', 'inside']
+  const ledger = createStatusLedger({ now: () => 10 })
+  ledger.observe(new Map(ids.map(id => [id, pending])), ids)
+  // The held-completion channel has to ignore them too: an archived conversation
+  // was put away on purpose, it is not unread mail.
+  ledger.setCompletions(new Map([['loose', Date.now()]]))
+  const markup = renderToStaticMarkup(createElement(MapPanelIcon, {
+    collapsed: collapse(true),
+    panelInfo: panelInfo(null),
+    size: 16,
+    store: archiveStore([
+      { sessionId: 'loose', nodeId: null, workspaceId: 'w1', archivedAt: '2026-11-01T00:00:00.000Z' },
+      { sessionId: 'inside', nodeId: 'archived-root', workspaceId: 'w1' },
+    ], [topicNode('archived-root', null, true)]),
+    statusLedger: ledger,
+    useSessions: selector => selector({
+      ids,
+      byId: Object.fromEntries(ids.map(id => [id, { displayTitle: id }])),
+    }),
+    useSessionStatus: selector => selector(new Map(ids.map(id => [id, pending]))),
+  }))
+  assert.ok(!markup.includes('cm-rollup'), 'the archive draws nothing on the always-mounted sidebar cluster')
+  assert.ok(!markup.includes('aria-label="会话状态'), 'the row keeps its plain name')
 })
 
 /*

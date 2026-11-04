@@ -9,19 +9,31 @@
  * Tree invariants (workspace binding, depth/node ceilings, cycle rejection, leaf
  * deletion) are delegated to `src/shared/model.ts` — the same functions the Web
  * UI uses — so the tool surface cannot drift from the map's semantics.
+ *
+ * The archive is invisible to the model: views and counts are taken from the
+ * active tree only, a read that names archived content fails with `ARCHIVED`,
+ * and every write guard refuses an archived target. Only the archive totals are
+ * reported back, so the model knows something is put away without seeing it.
  */
 import {
+  activeChildrenOf,
+  activeMapView,
+  activeTopNodesOf,
   adoptThread,
+  archiveStats,
   assignThreadIssue,
   assignThreads,
   createNode,
   deleteNode,
-  isRecordedSubagent,
+  inArchive,
   insertNodeBefore,
+  isArchivedThread,
+  isRecordedSubagent,
   updateNode,
   workspaceOfNode,
   type MapNode,
   type MapState,
+  type ThreadRef,
 } from '../shared/model.js'
 import { MapToolError } from './errors.js'
 import type {
@@ -47,6 +59,14 @@ export interface NodeView {
   readonly children?: NodeView[]
 }
 
+/** Archived content the model may not read: the archive counts only. */
+export interface ArchiveCounts {
+  /** Archived top-level topics (an archived subtree counts once). */
+  readonly nodes: number
+  /** Conversations the archive hides, inside archived topics or filed loose. */
+  readonly sessions: number
+}
+
 /** Workspace-level summary used when no scope was requested. */
 export interface WorkspaceNodeCount {
   readonly workspaceId: string
@@ -61,22 +81,43 @@ export interface StateView {
   readonly workspaces?: WorkspaceNodeCount[]
   readonly ungroupedNodes?: number
   readonly ungroupedThreads?: number
+  readonly archived: ArchiveCounts
   readonly truncated: boolean
 }
 
 /** Maximum projected nodes per state view. */
 const MAX_VIEW_NODES = 300
 
-/** Sibling display order shared with the Web UI. */
-function bySiblingOrder(left: MapNode, right: MapNode): number {
-  return left.position - right.position || left.title.localeCompare(right.title)
+/** Children of one parent in one workspace bucket, archived topics excluded. */
+function childrenOf(doc: MapState, parentId: string | null, workspaceId: string | null): MapNode[] {
+  return activeChildrenOf(doc, parentId).filter(node => workspaceOfNode(node) === workspaceId)
 }
 
-/** Children of one parent in one workspace bucket. */
-function childrenOf(doc: MapState, parentId: string | null, workspaceId: string | null): MapNode[] {
-  return doc.nodes
-    .filter(node => node.parentId === parentId && workspaceOfNode(node) === workspaceId)
-    .sort(bySiblingOrder)
+/** The tool failure for a read or write that names hidden (archived) content. */
+function archivedNodeError(nodeId: string): MapToolError {
+  return new MapToolError(
+    'ARCHIVED',
+    `node ${JSON.stringify(nodeId)} is archived; unarchive it in the map before reading or changing it`,
+  )
+}
+
+/** One conversation the archive hides, rejected with the model's code vocabulary. */
+function archivedSessionRejection(sessionId: string): RejectedSession {
+  return {
+    sessionId,
+    code: 'ARCHIVED',
+    message: `session ${JSON.stringify(sessionId)} is archived; unarchive it in the map before filing it again`,
+  }
+}
+
+/** Whether the archive hides one conversation: marked itself, or filed inside an archived topic. */
+function isArchivedConversation(doc: MapState, thread: ThreadRef): boolean {
+  return isArchivedThread(thread) || (thread.nodeId !== null && inArchive(doc, thread.nodeId))
+}
+
+/** Refuse a write that names a topic the archive hides (or a descendant of one). */
+function requireActiveNode(doc: MapState, nodeId: string): void {
+  if (inArchive(doc, nodeId)) throw archivedNodeError(nodeId)
 }
 
 /**
@@ -117,6 +158,7 @@ export function createNodes(
     }
   }
 
+  if (input.parentId !== null) requireActiveNode(doc, input.parentId)
   walk(input.nodes, input.parentId)
   return { doc: state, value: { created } }
 }
@@ -190,6 +232,9 @@ export function planGoal(
 
 /**
  * Rename and/or re-describe existing nodes atomically.
+ *
+ * A node the archive hides is refused: the model may not edit content it cannot
+ * read, and the whole batch is rejected before the store sees a document.
  * @param doc - current document.
  * @param input - per-node patches.
  * @returns next document plus the updated count.
@@ -199,6 +244,7 @@ export function updateNodes(doc: MapState, input: UpdateNodesInput): { doc: MapS
   for (const update of input.updates) {
     const node = state.nodes.find(candidate => candidate.id === update.nodeId)
     if (node === undefined) throw new MapToolError('NOT_FOUND', `node ${JSON.stringify(update.nodeId)} does not exist`)
+    if (inArchive(state, update.nodeId)) throw archivedNodeError(update.nodeId)
     state = updateNode(state, {
       id: update.nodeId,
       title: update.title ?? node.title,
@@ -214,12 +260,18 @@ export function updateNodes(doc: MapState, input: UpdateNodesInput): { doc: MapS
  *
  * Each move goes through the model's `insertNodeBefore`, so an omitted
  * `before_node_id` appends exactly as before and a given one places the node
- * ahead of that sibling; the whole list is one transaction.
+ * ahead of that sibling; the whole list is one transaction. A move that touches
+ * the archive — the node itself, the target parent, or the anchor — is refused.
  * @param doc - current document.
  * @param input - per-node target parents (`null` = workspace root) and anchors.
  * @returns next document plus the moved count.
  */
 export function moveNodes(doc: MapState, input: MoveNodesInput): { doc: MapState; value: { moved: number } } {
+  for (const move of input.moves) {
+    requireActiveNode(doc, move.nodeId)
+    if (move.parentId !== null) requireActiveNode(doc, move.parentId)
+    if (move.beforeNodeId !== undefined) requireActiveNode(doc, move.beforeNodeId)
+  }
   let state = doc
   for (const move of input.moves) {
     state = insertNodeBefore(state, move.nodeId, move.parentId, move.beforeNodeId)
@@ -240,6 +292,8 @@ export interface RejectedSession {
  * Every id must already have a row: unlike {@link attachSessions} nothing is
  * adopted here, and filing a row only rewrites its `nodeId`, so the conversation
  * keeps its activity stamp instead of jumping to the top of the target list.
+ * A hidden target topic refuses the whole call, and a conversation the archive
+ * hides is rejected per id so the rest of the batch still lands.
  * @param doc - current document.
  * @param input - target topic (`null` = the conversation's workspace row) and session ids.
  * @returns next document plus the moved ids and the per-id rejections.
@@ -248,10 +302,16 @@ export function moveSessions(
   doc: MapState,
   input: MoveSessionsInput,
 ): { doc: MapState; value: { moved: string[]; rejected: RejectedSession[] } } {
+  if (input.nodeId !== null) requireActiveNode(doc, input.nodeId)
   let state = doc
   const moved: string[] = []
   const rejected: RejectedSession[] = []
   for (const sessionId of input.sessionIds) {
+    const thread = doc.threads.find(candidate => candidate.sessionId === sessionId)
+    if (thread !== undefined && isArchivedConversation(doc, thread)) {
+      rejected.push(archivedSessionRejection(sessionId))
+      continue
+    }
     // The model's own judgement decides: missing target node, workspace, space
     // and subagent children. It stays permissive for an id the index has never
     // seen, so the row check below turns that silent no-op into NO_THREAD.
@@ -277,11 +337,15 @@ export function moveSessions(
 /**
  * Delete nodes leaf-first. `subtree` expands each target to its whole subtree
  * before deleting; `leaf` refuses any node that still has children.
+ *
+ * Deleting a topic the archive hides is refused, so the model cannot destroy
+ * content it never saw; the refusal lands before any node is removed.
  * @param doc - current document.
  * @param input - targets and mode.
  * @returns next document plus deleted ids (children before parents).
  */
 export function deleteNodes(doc: MapState, input: DeleteNodesInput): { doc: MapState; value: { deleted: string[] } } {
+  for (const nodeId of input.nodeIds) requireActiveNode(doc, nodeId)
   const ordered: string[] = []
   const seen = new Set<string>()
   const expand = (nodeId: string): void => {
@@ -311,7 +375,8 @@ export function deleteNodes(doc: MapState, input: DeleteNodesInput): { doc: MapS
  * — the same one the UI and `map_move_session` use — so it merely changes topic
  * and keeps its activity stamp. Only a session the map has never indexed is
  * adopted (row created with a "now" stamp): that is the new-session path this
- * tool exists for.
+ * tool exists for. A hidden target topic refuses the whole call, and a
+ * conversation the archive hides is rejected per id.
  * @param doc - current document.
  * @param input - target node and session ids.
  * @returns next document plus attached and rejected ids.
@@ -325,12 +390,17 @@ export function attachSessions(
 } {
   const node = doc.nodes.find(candidate => candidate.id === input.nodeId)
   if (node === undefined) throw new MapToolError('NOT_FOUND', `node ${JSON.stringify(input.nodeId)} does not exist`)
+  if (inArchive(doc, node.id)) throw archivedNodeError(node.id)
   const workspaceId = workspaceOfNode(node)
   let state = doc
   const attached: string[] = []
   const rejected: RejectedSession[] = []
   for (const sessionId of input.sessionIds) {
     const thread = state.threads.find(candidate => candidate.sessionId === sessionId)
+    if (thread !== undefined && isArchivedConversation(doc, thread)) {
+      rejected.push(archivedSessionRejection(sessionId))
+      continue
+    }
     // A subagent child never becomes a map row, so filing one under a node is
     // refused for the same reason the index never gives it a row in the first
     // place. The fact survives its row in the document's ledger.
@@ -415,6 +485,12 @@ function projectNode(
 
 /**
  * Project the document into the compact view addressed by the request.
+ *
+ * The archive stays invisible to the model: archived topics (and their whole
+ * subtrees) and hidden conversations are filtered out of every scope and count,
+ * and only their totals are reported back as `archived`. Asking for one archived
+ * node explicitly is an `ARCHIVED` failure rather than a silent `NOT_FOUND`, so
+ * the model learns the content exists but is put away.
  * @param doc - current document.
  * @param input - scope and expansion depth.
  * @returns the projection consumed by `map_get_state`.
@@ -424,19 +500,22 @@ export function viewState(
   input: { workspaceId?: string; nodeId?: string; depth: number },
 ): { value: StateView } {
   const budget = { remaining: MAX_VIEW_NODES, truncated: false }
+  const archived = archiveStats(doc)
   if (input.nodeId !== undefined) {
     const node = doc.nodes.find(candidate => candidate.id === input.nodeId)
     if (node === undefined) throw new MapToolError('NOT_FOUND', `node ${JSON.stringify(input.nodeId)} does not exist`)
+    if (inArchive(doc, node.id)) throw archivedNodeError(node.id)
     return {
       value: {
         scope: { nodeId: input.nodeId },
         nodes: [projectNode(doc, node, input.depth, budget)],
+        archived,
         truncated: budget.truncated,
       },
     }
   }
   if (input.workspaceId !== undefined) {
-    const roots = childrenOf(doc, null, input.workspaceId)
+    const roots = activeTopNodesOf(doc, input.workspaceId)
     const nodes: NodeView[] = []
     for (const root of roots) {
       if (budget.remaining <= 0) {
@@ -449,15 +528,17 @@ export function viewState(
       value: {
         scope: { workspaceId: input.workspaceId },
         nodes,
+        archived,
         truncated: budget.truncated,
       },
     }
   }
 
+  const active = activeMapView(doc)
   const counts = new Map<string, { nodeCount: number; threadCount: number }>()
   let ungroupedNodes = 0
   let ungroupedThreads = 0
-  for (const node of doc.nodes) {
+  for (const node of active.nodes) {
     const workspaceId = workspaceOfNode(node)
     if (workspaceId === null) {
       ungroupedNodes += 1
@@ -467,7 +548,7 @@ export function viewState(
     entry.nodeCount += 1
     counts.set(workspaceId, entry)
   }
-  for (const thread of doc.threads) {
+  for (const thread of active.threads) {
     const workspaceId = thread.workspaceId ?? null
     if (workspaceId === null) {
       ungroupedThreads += 1
@@ -485,6 +566,7 @@ export function viewState(
         .sort((left, right) => left.workspaceId.localeCompare(right.workspaceId)),
       ...ungroupedNodes === 0 ? {} : { ungroupedNodes },
       ...ungroupedThreads === 0 ? {} : { ungroupedThreads },
+      archived,
       truncated: false,
     },
   }

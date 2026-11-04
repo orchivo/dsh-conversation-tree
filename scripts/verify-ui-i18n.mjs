@@ -30,11 +30,18 @@ const COPY_ATTRIBUTES = new Set([
 ])
 
 /**
- * Non-copy literals kept on purpose: the legacy on-disk default-space title,
- * migrated to the neutral marker on read. It is data, never display copy.
+ * Non-copy literals kept on purpose, per file.
+ *
+ * The value is the exact set of authored literals that file may carry: a file
+ * can legitimately own more than one, and an allow-list of single strings would
+ * force a whole-file exemption instead.
  */
 const ALLOWED = new Map([
-  ['src/shared/model.ts', '默认空间'],
+  /*
+   * The legacy on-disk default-space title, migrated to the neutral marker on
+   * read. It is data, never display copy.
+   */
+  ['src/shared/model.ts', new Set(['默认空间'])],
 ])
 
 /** Files whose string literals are not UI copy. */
@@ -77,7 +84,7 @@ export function findCopyViolations(ts, file, sourceText) {
   const report = (node, text, reason) => {
     const value = text.replace(/\s+/g, ' ').trim()
     if (value === '' || !CJK.test(value)) return
-    if (ALLOWED.get(file) === value) return
+    if (ALLOWED.get(file)?.has(value) === true) return
     const position = source.getLineAndCharacterOfPosition(node.getStart(source))
     violations.push({
       file,

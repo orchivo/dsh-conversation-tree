@@ -42,6 +42,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 
 import { FRESH_MS, type ObservedSessionStatus, type StatusCategory, type StatusCounts, type StatusRollup } from '../shared/status-rollup.js'
 import type { BandCollapseStore, FirstRunHintStore } from '../shared/mode-memory.js'
+import { inArchive } from '../shared/model.js'
 import { LocaleProvider, useLocaleT, type LocaleService } from './locale.js'
 import type { MapStore } from './map-store.js'
 import type { CatalogState, ObservableSnapshot, RootPanelProps, SessionStatusLike } from './services.js'
@@ -243,7 +244,7 @@ export function MapLauncher({ collapsed, hint, bandSlot, locale }: MapLauncherPr
             collapsed?.set(false)
           }}
         />
-        {pending && visible && <span className="cm-hint" aria-hidden="true">{t('view.expand')}</span>}
+        {pending && visible && <span className="cm-seat-hint" aria-hidden="true">{t('view.expand')}</span>}
       </span>
     </LocaleProvider>
   )
@@ -414,6 +415,10 @@ export function MapPanelIcon({
    * Classification mirrors `MapPanel`'s categories map, including a parent that
    * is running because one of its subagents is: pending beats running, running
    * beats a forwarded error, an error beats an unread completion.
+   *
+   * Archived conversations are out of scope: filing work away is the reader's
+   * statement that it should stop asking for attention, so the cluster counts
+   * only the active tree (the archive row carries its own activity mark).
    */
   const rollup = useMemo<StatusRollup | undefined>(() => {
     if (store === undefined || statusLedger === undefined) return undefined
@@ -426,6 +431,13 @@ export function MapPanelIcon({
     let fresh: StatusCategory | undefined
     let freshAt = 0
     for (const thread of doc.threads) {
+      // The archive is the reader's "put it away": its conversations stay
+      // readable and executable, but they take no part in the map-wide counts.
+      // A conversation filed under an archived topic is just as archived as one
+      // carrying its own mark, so ask the model's shared predicate rather than
+      // re-deriving tree ancestry here.
+      if (thread.archivedAt !== undefined) continue
+      if (thread.nodeId !== null && inArchive(doc, thread.nodeId)) continue
       const sessionId = thread.sessionId
       threadIds.add(sessionId)
       const status = statuses.get(sessionId)

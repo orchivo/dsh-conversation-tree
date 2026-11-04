@@ -14,7 +14,7 @@ import { test } from 'node:test'
 import { createMapFileStore } from '../lib/host-store.js'
 import { registerMapPromptSection, MAP_GUIDANCE } from '../lib/host-prompt.js'
 import { registerMapTools } from '../lib/host-tools.js'
-import { emptyMap, ensureDefaultSpace } from '../lib/model.js'
+import { adoptThread, createNode, emptyMap, ensureDefaultSpace } from '../lib/model.js'
 
 /** The workspace fixture the fake registry reports. */
 const WORKSPACES = [
@@ -53,6 +53,43 @@ function fakeContext() {
 /** A tool execution identity whose session runs in workspace alpha. */
 function execIn(cwd = '/tmp/alpha') {
   return { agent: { session: { id: 'session-1', header: { cwd } } } }
+}
+
+/** Fixed archive stamp shared by the archived fixture items. */
+const ARCHIVED_AT = '2026-01-01T00:00:00.000Z'
+
+/**
+ * A document with an active tree plus one fully archived block.
+ *
+ * Active: `goal` → `child`, with `s-active` filed under `goal`.
+ * Archive: the detached root `archived` with descendant `archived-child`;
+ * `s-inside` sits under that descendant without a mark of its own and
+ * `s-loose` is archived directly on the Workspace row.
+ * @returns the map document.
+ */
+function archivedDoc() {
+  let state = ensureDefaultSpace(emptyMap())
+  state = createNode(state, { parentId: null, workspaceId: 'w1', title: 'goal', id: 'goal' }).state
+  state = createNode(state, { parentId: 'goal', title: 'child', id: 'child' }).state
+  state = createNode(state, { parentId: null, workspaceId: 'w1', title: 'archived topic', id: 'archived' }).state
+  state = createNode(state, { parentId: 'archived', title: 'archived child', id: 'archived-child' }).state
+  state = adoptThread(state, { sessionId: 's-active', title: 'active talk', nodeId: 'goal', workspaceId: 'w1' })
+  state = adoptThread(state, { sessionId: 's-inside', title: 'inside talk', nodeId: 'archived-child', workspaceId: 'w1' })
+  state = adoptThread(state, { sessionId: 's-loose', title: 'loose talk', nodeId: null, workspaceId: 'w1' })
+  return {
+    ...state,
+    nodes: state.nodes.map(node =>
+      node.id === 'archived' ? { ...node, parentId: null, archivedAt: ARCHIVED_AT, archivedParentId: null } : node),
+    threads: state.threads.map(thread => thread.sessionId === 's-loose' ? { ...thread, archivedAt: ARCHIVED_AT } : thread),
+  }
+}
+
+/**
+ * Store the archived fixture in one write, the way a client sync would leave it.
+ * @param store - the temporary map store.
+ */
+async function seedArchived(store) {
+  await store.apply(() => ({ doc: archivedDoc(), value: undefined }), 'test')
 }
 
 /**
@@ -333,5 +370,185 @@ test('the guidance prompt section is registered once orders before the workflow 
     assert.equal(promptSections[0].order, 2500)
     assert.equal(promptSections[0].text, MAP_GUIDANCE)
     assert.match(promptSections[0].text, /map_plan_goal/)
+  })
+})
+
+test('map_get_state hides archived content and reports the archive totals', async () => {
+  await withTools(async ({ invoke, store }) => {
+    await seedArchived(store)
+
+    const summary = await invoke('map_get_state', {})
+    assert.equal(summary.ok, true)
+    assert.deepEqual(summary.archived, { nodes: 1, sessions: 2 }, 'one archived topic and two hidden conversations')
+    const alpha = summary.workspaces.find(entry => entry.workspace_id === 'w1')
+    assert.equal(alpha.node_count, 2, 'only active topics are counted')
+    assert.equal(alpha.thread_count, 1, 'only active conversations are counted')
+
+    const tree = await invoke('map_get_state', { workspace_id: 'w1' })
+    assert.equal(tree.ok, true)
+    assert.deepEqual(tree.nodes.map(node => node.id), ['goal'], 'the archived root is not a workspace topic')
+    assert.equal(tree.nodes[0].childCount, 1)
+    assert.deepEqual(tree.archived, { nodes: 1, sessions: 2 })
+
+    const subtree = await invoke('map_get_state', { node_id: 'goal', depth: 3 })
+    assert.equal(subtree.ok, true)
+    assert.deepEqual(subtree.nodes[0].children.map(node => node.id), ['child'])
+    assert.deepEqual(subtree.archived, { nodes: 1, sessions: 2 })
+  })
+})
+
+test('map_get_state always reports the archive counter, even when empty', async () => {
+  await withTools(async ({ invoke }) => {
+    const fresh = await invoke('map_get_state', {})
+    assert.equal(fresh.ok, true)
+    assert.deepEqual(fresh.archived, { nodes: 0, sessions: 0 })
+  })
+})
+
+test('map_get_state reports ARCHIVED for an archived node id instead of NOT_FOUND', async () => {
+  await withTools(async ({ invoke, store }) => {
+    await seedArchived(store)
+    for (const nodeId of ['archived', 'archived-child']) {
+      const result = await invoke('map_get_state', { node_id: nodeId })
+      assert.equal(result.ok, false, `${nodeId} is hidden from the model`)
+      assert.equal(result.code, 'ARCHIVED')
+    }
+    const missing = await invoke('map_get_state', { node_id: 'ghost' })
+    assert.equal(missing.ok, false)
+    assert.equal(missing.code, 'NOT_FOUND')
+  })
+})
+
+test('map_list_workspaces counts only active content', async () => {
+  await withTools(async ({ invoke, store }) => {
+    await seedArchived(store)
+    const result = await invoke('map_list_workspaces', {})
+    assert.equal(result.ok, true)
+    const alpha = result.workspaces.find(workspace => workspace.workspace_id === 'w1')
+    assert.equal(alpha.node_count, 2)
+    assert.equal(alpha.thread_count, 1)
+    const beta = result.workspaces.find(workspace => workspace.workspace_id === 'w2')
+    assert.equal(beta.node_count, 0)
+    assert.equal(beta.thread_count, 0)
+  })
+})
+
+test('map_create_nodes refuses an archived parent', async () => {
+  await withTools(async ({ invoke, store }) => {
+    await seedArchived(store)
+    const before = store.snapshot().revision
+    for (const parentId of ['archived', 'archived-child']) {
+      const result = await invoke('map_create_nodes', { parent_id: parentId, nodes: [{ title: 'child' }] })
+      assert.equal(result.ok, false)
+      assert.equal(result.code, 'ARCHIVED')
+    }
+    assert.equal(store.snapshot().revision, before, 'a refused create never writes the document')
+    assert.equal(store.snapshot().doc.nodes.length, 4)
+  })
+})
+
+test('map_update_nodes and map_delete_nodes refuse archived nodes', async () => {
+  await withTools(async ({ invoke, store }) => {
+    await seedArchived(store)
+    for (const nodeId of ['archived', 'archived-child']) {
+      const updated = await invoke('map_update_nodes', { updates: [{ node_id: nodeId, title: 'renamed' }] })
+      assert.equal(updated.ok, false)
+      assert.equal(updated.code, 'ARCHIVED')
+
+      const deleted = await invoke('map_delete_nodes', { node_ids: [nodeId], mode: 'subtree', confirm: true })
+      assert.equal(deleted.ok, false)
+      assert.equal(deleted.code, 'ARCHIVED')
+    }
+
+    // One archived id rejects the whole batch, so no partial edit lands.
+    const before = store.snapshot().revision
+    const mixed = await invoke('map_update_nodes', {
+      updates: [{ node_id: 'goal', title: 'renamed' }, { node_id: 'archived', title: 'no' }],
+    })
+    assert.equal(mixed.ok, false)
+    assert.equal(mixed.code, 'ARCHIVED')
+    assert.equal(store.snapshot().revision, before)
+    assert.equal(store.snapshot().doc.nodes.find(node => node.id === 'goal').title, 'goal')
+  })
+})
+
+test('map_move_nodes refuses an archived source, target parent, or anchor', async () => {
+  await withTools(async ({ invoke, store }) => {
+    await seedArchived(store)
+    const moves = [
+      { node_id: 'archived' },
+      { node_id: 'archived-child', parent_id: 'goal' },
+      { node_id: 'goal', parent_id: 'archived' },
+      { node_id: 'goal', before_node_id: 'archived' },
+    ]
+    for (const move of moves) {
+      const result = await invoke('map_move_nodes', { moves: [move] })
+      assert.equal(result.ok, false, JSON.stringify(move))
+      assert.equal(result.code, 'ARCHIVED')
+    }
+  })
+})
+
+test('map_move_session refuses an archived target and reports hidden conversations per id', async () => {
+  await withTools(async ({ invoke, store }) => {
+    await seedArchived(store)
+
+    const blocked = await invoke('map_move_session', { node_id: 'archived', session_ids: ['s-active'] })
+    assert.equal(blocked.ok, false)
+    assert.equal(blocked.code, 'ARCHIVED')
+
+    const result = await invoke('map_move_session', { session_ids: ['s-active', 's-inside', 's-loose'] })
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.moved, ['s-active'], 'only the visible conversation moves to the workspace row')
+    assert.deepEqual(
+      result.rejected.map(entry => [entry.session_id, entry.code]),
+      [['s-inside', 'ARCHIVED'], ['s-loose', 'ARCHIVED']],
+    )
+    const doc = store.snapshot().doc
+    assert.equal(doc.threads.find(thread => thread.sessionId === 's-active').nodeId, null)
+    assert.equal(doc.threads.find(thread => thread.sessionId === 's-inside').nodeId, 'archived-child')
+    assert.equal(doc.threads.find(thread => thread.sessionId === 's-loose').nodeId, null)
+  })
+})
+
+test('map_attach_sessions refuses an archived target and reports hidden conversations per id', async () => {
+  await withTools(async ({ invoke, store }) => {
+    await seedArchived(store)
+
+    const blocked = await invoke('map_attach_sessions', { node_id: 'archived', session_ids: ['s-new'] })
+    assert.equal(blocked.ok, false)
+    assert.equal(blocked.code, 'ARCHIVED')
+
+    const result = await invoke('map_attach_sessions', {
+      node_id: 'child',
+      session_ids: ['s-inside', 's-loose', 's-new'],
+    })
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.attached, ['s-new'], 'only the visible session is adopted')
+    assert.deepEqual(
+      result.rejected.map(entry => [entry.session_id, entry.code]),
+      [['s-inside', 'ARCHIVED'], ['s-loose', 'ARCHIVED']],
+    )
+    const doc = store.snapshot().doc
+    assert.equal(doc.threads.find(thread => thread.sessionId === 's-new').nodeId, 'child')
+    assert.equal(doc.threads.find(thread => thread.sessionId === 's-inside').nodeId, 'archived-child')
+    assert.equal(doc.threads.find(thread => thread.sessionId === 's-loose').nodeId, null)
+  })
+})
+
+test('map_plan_goal still creates a plan while the archive hides content', async () => {
+  await withTools(async ({ invoke, store }) => {
+    await seedArchived(store)
+    const result = await invoke('map_plan_goal', {
+      goal: { title: '发布 v2' },
+      strategies: [{ title: '技术方案', tasks: [{ title: '任务 1' }] }],
+    })
+    assert.equal(result.ok, true)
+    assert.equal(result.createdCount, 3)
+
+    const summary = await invoke('map_get_state', {})
+    assert.equal(summary.ok, true)
+    assert.equal(summary.workspaces.find(entry => entry.workspace_id === 'w1').node_count, 5, 'the new plan joins the active count')
+    assert.deepEqual(summary.archived, { nodes: 1, sessions: 2 }, 'the archive totals are untouched')
   })
 })

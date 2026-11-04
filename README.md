@@ -73,6 +73,15 @@ Install the DSH plugin dsh-conversation-tree for me:
 - **Bilingual UI** — Simplified Chinese and English, following **Settings → General → Language** and switching live, no restart.
 - **Resizable and remembered** — drag the band's right edge (minimum 320px); the conversation column keeps its own minimum width and is never squeezed away.
 
+## What's new in 0.2.0
+
+- **The tree follows the conversation** — opening, creating or externally navigating to a conversation always lands the tree on that conversation's home (its topic, its Workspace row, the space's «Ungrouped» row or its «Archived» row); ungrouped conversations no longer leave the tree on another branch, and clicking a topic row stays a temporary browse that a reload forgets.
+- **Archive per Workspace** — every Workspace ends with an «Archived» shelf: put a topic (with its subtree and conversations) or a single conversation away without freezing it; archived conversations stay openable, searchable and continuable, and the model tools answer `ARCHIVED` instead of touching them.
+- **Drag to organise** — drag conversations onto topics (or a Workspace row) and topics onto each other or between siblings; «the topic + its conversations + its footer» is one drop target, with before/after on its 8px edges.
+- **Delete asks first** — deleting a topic confirms, then removes its whole subtree at once; its conversations are kept and fall back to the Workspace top level.
+- **Conversation home** — the home chain is always a filled brand folder with a bold title, a clicked node is a 1.5px brand outline, and the composer gains a quiet 30px line naming `space › workspace › topic › conversation title` when the selection points away.
+- **Quieter chrome, clearer creation** — the new-topic dialog states where the topic will live as a read-only chain, the band's top bar keeps its two rows in every session state, and title tooltips, the start-edge fade, the space badge and the first column now follow real measurements.
+
 ## Not the same as a message-branch plugin
 
 There are two different plugins with a similar name, and they solve opposite problems:
@@ -116,13 +125,13 @@ The plugin registers nine tools so the model can read and write the tree directl
 | `map_move_nodes` | Re-parent or reorder nodes |
 | `map_move_session` | File a conversation under a node, or rename/move it |
 | `map_attach_sessions` | Attach existing conversations to a node |
-| `map_delete_nodes` | Delete nodes (including their subtrees) |
+| `map_delete_nodes` | Delete nodes (`leaf` / `subtree`, requires `confirm`; their conversations are kept and fall back to the Workspace row) |
 
 ## Known limitations
 
 - **Depends on public product DOM contracts** (the frame `shell.overlay` slot, the conversation anchor, the header's leading seat, the sidebar-collapsed marker). If they change, the band degrades to a notice; the sidebar panel row keeps working.
 - **Single left-band slot**: coordinates with other band plugins through the public `html[data-dsh-band-owner]` attribute.
-- **Limited drag scope**: re-parent a node through the `⋯` menu; topics are not dragged. Spaces cannot be reordered by dragging.
+- **Drag scope**: conversation rows can be dropped on a topic/Workspace row, and topic rows can be re-parented or sibling-ordered («the topic + its conversations + its footer» is the target; its top/bottom 8px mean before/after). Ungrouped content does not drag, cross-Workspace moves are not supported, and spaces cannot be reordered by dragging.
 - **No cross-Workspace conversation moves**: ordering applies within one WorkSpace.
 - **Single writer**: when the same `$DSH_HOME` is written by several processes, the last writer wins.
 - **Windows desktop: not independently verified** (tested on macOS).

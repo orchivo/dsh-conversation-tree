@@ -16,6 +16,7 @@ import { useCallback, useSyncExternalStore } from 'react'
 
 import type { LocaleService } from './locale.js'
 import type { MapStore } from './map-store.js'
+import type { MapViewBridge } from './view-bridge.js'
 
 /** The DSH client locale service face this plugin uses (see `locale.tsx`). */
 export type { LocaleService } from './locale.js'
@@ -167,6 +168,16 @@ export interface MapServices {
   externalCurrent?: ObservableSnapshot<string | null>
   /** Collapse the band and hand the centre back to the shipped Conversation. */
   collapse?: () => void
+  /**
+   * The band's view state, lent to the composer-side notice.
+   *
+   * The panel remains the document's only writer; the bridge publishes the
+   * committed view and the two actions the notice may call, so the contribution
+   * rendered by the shipped Conversation can answer "does the selection still
+   * name this conversation's home?" without owning any map state. Absent in
+   * render tests, where the panel keeps its historical self-contained path.
+   */
+  viewBridge?: MapViewBridge | undefined
 }
 
 /** Open the Host's native directory chooser; resolves null when cancelled. */

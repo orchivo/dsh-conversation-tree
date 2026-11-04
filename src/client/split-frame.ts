@@ -76,6 +76,44 @@ export const FALLBACK_FRAME: BandFrame = {
   seatWidth: 0,
 }
 
+/**
+ * The shell sidebar's window padding, in CSS pixels, as the band has to pay it
+ * once that sidebar is gone.
+ *
+ * The band's own column already keeps a 6px pill inset (`.cm-col-scroll`),
+ * while the shipped sidebar spends its 12px root inset
+ * (`--dsh-sidebar-inline-padding`) before the same 8px row inset. This 6px
+ * completes that 12px: the first column's pills then sit 12px from the window
+ * edge, its icon rail at 20px and its titles at 42px — the exact rails the
+ * product's own Workspace list uses (see the `--cm-band-window-gutter` block in
+ * `styles.ts`).
+ */
+export const WINDOW_EDGE_GUTTER = 6
+
+/**
+ * Extra left inset the band's first column owes while the band owns the
+ * frame's left edge.
+ *
+ * `frame.left` is the Conversation column's left edge measured against the
+ * frame-wide overlay layer, which is also the band's own left edge: 0 means no
+ * column stands between the band and the window. That is exactly the state
+ * where the band replaces the shell sidebar — macOS and Windows desktop
+ * collapse the left column to zero width — and therefore the state where it
+ * must carry the sidebar's window padding. Any other value means a column (or
+ * the Web 56px rail) is still in front, and the band's in-column rail is
+ * already measured from a seam rather than from the window.
+ *
+ * Gated on `ready` on purpose: {@link FALLBACK_FRAME} has `left: 0`, and an
+ * unmeasured first paint must not indent the column and then snap back. The
+ * 1px tolerance absorbs a rounded sub-pixel frame edge.
+ * @param frame - the measured band frame.
+ * @returns {@link WINDOW_EDGE_GUTTER} while the band is flush with the frame
+ *   edge, otherwise 0.
+ */
+export function windowEdgeGutter(frame: BandFrame): number {
+  return frame.ready && frame.left <= 1 ? WINDOW_EDGE_GUTTER : 0
+}
+
 /** Parse a CSS pixel value, falling back when it is absent or malformed. */
 function px(value: string, fallback: number): number {
   const parsed = Number.parseFloat(value)

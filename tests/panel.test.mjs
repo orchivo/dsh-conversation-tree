@@ -18,12 +18,12 @@ import { renderToStaticMarkup } from 'react-dom/server'
 
 import {
   AUTO_SCROLL_EDGE_PX, AUTO_SCROLL_MAX_PX, DragLabel, MapPanel, MoveThreadField, NodeColumnView,
-  NodePositionField, SPRING_LOAD_MS, applyDragPlan, autoScrollStep, candidateFromRow, commitsOnEnter,
-  consumeOneShot, dialogClass, dragLabelStyle, edgeOfRow, enterCommits, followAfterMove,
-  followNativeNavigation, heldOverlay, insertionLineStyle, moveFailureMessage, moveTreeRows,
-  planFromDecision, showsStatusRollup, siblingTargets, springLoadTarget, threadMenuModel, threadMoveChange,
-  threadMoveDefault, threadMoveIsNoop, threadMoveOptions, treeStep, visibleTreeRows, SpaceMenuTrailing,
-  overlayOffset, spaceBreadcrumbDensities,
+  NodeLocationRail, NodePositionField, SPRING_LOAD_MS, applyDragPlan, autoScrollStep, commitsOnEnter,
+  bandHeaderHeight, consumeOneShot, dialogClass, dialogPrimaryLabel, dragLabelStyle, enterCommits,
+  browsingForRow, browsingForSpace, followAfterMove, followNativeNavigation, followSessionHome, heldOverlay, insertionLineStyle, moveFailureMessage, moveTreeRows,
+  nodeTitleIssue, planFromDecision, scrolledFromStart, selectionAfterArchive, showsStatusRollup, siblingTargets, springLoadTarget, threadMenuModel, threadMoveChange,
+  threadMoveDefault, threadMoveIsNoop, threadMoveOptions, titleTipPlacement, treeStep, visibleTreeRows, SpaceMenuTrailing,
+  overlayOffset, nextSpaceBreadcrumbDensity, spaceBreadcrumbDensities, WINDOW_EDGE_GUTTER, windowEdgeGutter,
 } from '../lib/panel.js'
 import { MapError } from '../lib/model.js'
 import { ensureDefaultSpace, parseMapState, syncCatalog } from '../lib/model.js'
@@ -510,8 +510,8 @@ test('a view pointing at a removed Workspace falls back to no selection', () => 
 test('the open conversation is marked current and its owning node stays selected', () => {
   const markup = render(store(MAP, view({ selectedNodeId: 'n1', openSessionId: 's1' })))
   assert.equal((markup.match(/data-selected="true"/g) ?? []).length, 2, 'one node and one conversation are marked')
-  assert.match(markup, /class="cm-thread-row"[^>]*aria-current="page"[^>]*title="第一条对话"/)
-  assert.match(markup, /class="cm-node-row"[^>]*data-selected="true"[^>]*title="外贸探索"/)
+  assert.match(markup, /class="cm-thread-row"[^>]*data-session-id="s1"[^>]*aria-current="page"/)
+  assert.match(markup, /class="cm-node-row"[^>]*data-node-id="n1"[^>]*data-selected="true"/)
 })
 
 test('a closed conversation is not marked current', () => {
@@ -522,29 +522,29 @@ test('a closed conversation is not marked current', () => {
 
 test('a deep selection marks its whole lineage, Workspace row included', () => {
   const markup = render(store(MAP, view({ selectedNodeId: 'n2' })))
-  assert.match(markup, /class="cm-node-row"[^>]*data-selected="true"[^>]*title="获客方式"/, 'the selected leaf keeps the selection mark')
-  assert.match(markup, /class="cm-node-row"[^>]*data-path-selected="true"[^>]*title="外贸探索"/, 'the parent row marks the path')
-  assert.match(markup, /data-kind="workspace"[^>]*data-path-selected="true"[^>]*title="alpha"/, 'the owning Workspace row marks the path')
+  assert.match(markup, /class="cm-node-row"[^>]*data-node-id="n2"[^>]*data-selected="true"/, 'the selected leaf keeps the selection mark')
+  assert.match(markup, /class="cm-node-row"[^>]*data-node-id="n1"[^>]*data-path-selected="true"/, 'the parent row marks the path')
+  assert.match(markup, /data-kind="workspace"[^>]*data-row-key="@ws:w1"[^>]*data-path-selected="true"/, 'the owning Workspace row marks the path')
   assert.equal((markup.match(/data-path-selected="true"/g) ?? []).length, 2, 'one mark per level above the selection, no more')
 })
 
 test('rows off the lineage stay unmarked', () => {
   const markup = render(store(MAP, view({ selectedNodeId: 'n2' })))
-  assert.match(markup, /data-kind="workspace"[^>]*data-path-selected="false"[^>]*title="beta"/, 'a sibling Workspace is not on the path')
-  assert.match(markup, /data-kind="ungrouped"[^>]*data-path-selected="false"[^>]*title="未分组"/, 'the ungrouped bucket is not on the path')
+  assert.match(markup, /data-kind="workspace"[^>]*data-row-key="@ws:w2"[^>]*data-path-selected="false"/, 'a sibling Workspace is not on the path')
+  assert.match(markup, /data-kind="ungrouped"[^>]*data-row-key="@ungrouped"[^>]*data-path-selected="false"/, 'the ungrouped bucket is not on the path')
 })
 
 test('an open conversation marks its owning node and the lineage above it', () => {
   const markup = render(store(MAP, view({ selectedNodeId: 'n1', openSessionId: 's1' })))
   assert.equal((markup.match(/data-selected="true"/g) ?? []).length, 2, 'the conversation and its owning node keep the selection marks')
   assert.equal((markup.match(/data-path-selected="true"/g) ?? []).length, 1, 'only the Workspace row is above the owning node')
-  assert.match(markup, /data-kind="workspace"[^>]*data-path-selected="true"[^>]*title="alpha"/)
+  assert.match(markup, /data-kind="workspace"[^>]*data-row-key="@ws:w1"[^>]*data-path-selected="true"/)
 })
 
 test('a Workspace selection has no lineage above it', () => {
   const markup = render(store(MAP, view({ selectedNodeId: '@ws:w1' })))
   assert.equal((markup.match(/data-path-selected="true"/g) ?? []).length, 0, 'the first level is the top of the chain')
-  assert.match(markup, /class="cm-node-row"[^>]*data-selected="true"[^>]*title="alpha"/)
+  assert.match(markup, /class="cm-node-row"[^>]*data-row-key="@ws:w1"[^>]*data-selected="true"/)
 })
 
 test('every level above a deep selection marks the path, not just the parent', () => {
@@ -563,9 +563,9 @@ test('every level above a deep selection marks the path, not just the parent', (
     threads: [],
   }
   const markup = render(store(deep, view({ selectedNodeId: 'd3' })))
-  const marked = [...markup.matchAll(/class="cm-node-row"[^>]*data-path-selected="true"[^>]*title="([^"]*)"/g)]
-    .map(match => match[1])
-  assert.deepEqual(marked, ['alpha', '第 1 层', '第 2 层'], 'Workspace, then each ancestor from the root down')
+  const marked = [...markup.matchAll(/class="cm-node-row"[^>]*data-path-selected="true"[^>]*>/g)]
+    .map(match => /data-(?:node-id|row-key)="([^"]*)"/.exec(match[0])?.[1])
+  assert.deepEqual(marked, ['@ws:w1', 'd1', 'd2'], 'Workspace, then each ancestor from the root down')
 })
 
 test('a missing session service does not break the render', () => {
@@ -737,6 +737,32 @@ test('search is on demand: the resting header keeps the row but shows no input',
 })
 
 /**
+ * The band's chrome is two rows in every Session state.
+ *
+ * The shipped Conversation header is 76px while a Session is open and 40px on
+ * the blank landing page. Making the band's top bar follow it down to one row
+ * folded the space switcher into row 1 — a different control, at a different
+ * place and width — and moved the whole map chrome whenever a blank Session
+ * opened or a Session started. The band instead keeps its own two-row height
+ * (`bandHeaderHeight`), and the shipped height stays the floor so a future,
+ * taller header still lines the seam up.
+ */
+test('the band top bar keeps its two rows on a blank Session and follows a taller shipped header', () => {
+  assert.equal(
+    bandHeaderHeight({ headerHeight: 40, headTop: 10, headHeight: 30 }), 76,
+    'the blank 40px header does not shrink the band top bar',
+  )
+  assert.equal(
+    bandHeaderHeight({ headerHeight: 76, headTop: 10, headHeight: 30 }), 76,
+    'with a Session open the band top bar is exactly the shipped header height',
+  )
+  assert.equal(
+    bandHeaderHeight({ headerHeight: 96, headTop: 12, headHeight: 32 }), 96,
+    'a taller shipped header still wins over the band own two rows',
+  )
+})
+
+/**
  * The band's top bar is a window-chrome row, so it claims the shell's drag mark.
  *
  * macOS desktop dragging is opt-in per row: the shell's base.css declares the
@@ -868,24 +894,35 @@ test('a single-space document spends no cluster on the current segment', () => {
   assert.ok(markup.slice(rootStart, currentStart).includes('cm-rollup'), 'the root keeps the whole-map total')
 })
 
-test('a narrow band renders the current cluster as dots and a narrower one drops it', () => {
+test('the breadcrumb’s current cluster is measured in the browser, so the server keeps it whole', () => {
+  // The density is chosen by measuring the row (the current space's name must
+  // not ellipsize), and a server render has no layout to measure: it keeps the
+  // richest form and the browser's layout effect walks it down. The band-width
+  // thresholds this replaced dropped the numbers on every band under 480px,
+  // leaving >100px of the row unused at 378px.
   const status = useStatus({ s1: { pendingInteraction: { kind: 'approval' } } })
-  const dots = render(store(SPACES_MAP, view({ activeSpace: 'sp-work', mapWidth: 440 })), { useSessionStatus: status })
-  const dotStart = dots.indexOf('cm-crumb-current')
-  assert.ok(dots.slice(dotStart, dotStart + 900).includes('cm-rollup-dots'), '440px keeps the hint as dots')
-  const none = render(store(SPACES_MAP, view({ activeSpace: 'sp-work', mapWidth: 400 })), { useSessionStatus: status })
-  const noneStart = none.indexOf('cm-crumb-current')
-  assert.ok(!none.slice(noneStart, noneStart + 900).includes('cm-rollup'), '400px drops the current cluster')
+  for (const mapWidth of [320, 400, 440, 480]) {
+    const markup = render(store(SPACES_MAP, view({ activeSpace: 'sp-work', mapWidth })), { useSessionStatus: status })
+    const start = markup.indexOf('cm-crumb-current')
+    const current = markup.slice(start, start + 900)
+    assert.ok(current.includes('cm-rollup'), `mapWidth ${mapWidth}: the first paint keeps the current cluster`)
+    assert.ok(!current.includes('cm-rollup-dots'), 'the first paint is the number cluster, not the presence-only dots')
+  }
 })
 
-test('the breadcrumb density ladder gives the current segment up before the root', () => {
-  assert.deepEqual(spaceBreadcrumbDensities(480, { search: false, singleSpace: false }), { root: 'cluster', current: 'cluster' })
-  assert.deepEqual(spaceBreadcrumbDensities(479, { search: false, singleSpace: false }), { root: 'cluster', current: 'dots' })
-  assert.deepEqual(spaceBreadcrumbDensities(420, { search: false, singleSpace: false }), { root: 'cluster', current: 'dots' })
-  assert.deepEqual(spaceBreadcrumbDensities(419, { search: false, singleSpace: false }), { root: 'cluster', current: 'none' })
-  assert.deepEqual(spaceBreadcrumbDensities(320, { search: false, singleSpace: false }), { root: 'cluster', current: 'none' })
-  assert.deepEqual(spaceBreadcrumbDensities(480, { search: true, singleSpace: false }), { root: 'none', current: 'none' })
-  assert.deepEqual(spaceBreadcrumbDensities(480, { search: false, singleSpace: true }), { root: 'cluster', current: 'none' })
+test('the breadcrumb density ladder only ever gives the current segment away', () => {
+  assert.equal(nextSpaceBreadcrumbDensity('cluster'), 'dots', 'numbers give way to dots first')
+  assert.equal(nextSpaceBreadcrumbDensity('dots'), 'none', 'dots give way last')
+  assert.equal(nextSpaceBreadcrumbDensity('none'), 'none', 'nothing is left to give away')
+  for (const current of ['cluster', 'dots', 'none']) {
+    assert.deepEqual(
+      spaceBreadcrumbDensities({ search: false, singleSpace: false, current }),
+      { root: 'cluster', current },
+      'the root keeps its numbers at every rung',
+    )
+  }
+  assert.deepEqual(spaceBreadcrumbDensities({ search: true, singleSpace: false, current: 'cluster' }), { root: 'none', current: 'none' })
+  assert.deepEqual(spaceBreadcrumbDensities({ search: false, singleSpace: true, current: 'cluster' }), { root: 'cluster', current: 'none' })
 })
 
 test('the target column only lists the Workspaces of the active space, in Host order', () => {
@@ -1046,10 +1083,17 @@ test('without an open conversation the band keeps only the single view button', 
  */
 test('without a measured narrowed seat the band draws no new-session button', () => {
   const markup = render(store(MAP, view({ openSessionId: 's1' })))
-  assert.ok(!markup.includes('cm-lead-icon'), 'the band does not claim the shell seat before measuring it')
-  assert.ok(!markup.includes('aria-label="新建会话"'), 'the shell keeps the only 新建会话 while its seat is unmeasured')
+  // Count the controls themselves, never the words: the phrase may also sit in
+  // copy that is not a button (a title or tooltip, say), and a
+  // full-text scan cannot tell that apart from a second entry. The band's own
+  // two facts are the box it would draw (`.cm-lead-icon`) and the accessible
+  // name it would give it (`aria-label`, i.e. `common.newSession`).
+  const leadIcons = (markup.match(/class="cm-lead-icon"/g) ?? []).length
+  const namedButtons = (markup.match(/aria-label="新建会话"/g) ?? []).length
+  assert.equal(leadIcons, 0, 'the band does not claim the shell seat before measuring it')
+  assert.equal(namedButtons, 0, 'the shell keeps the only 新建会话 while its seat is unmeasured')
   assert.equal(
-    (markup.match(/新建会话/g) ?? []).length,
+    leadIcons + namedButtons,
     0,
     'the band adds no second new-session entry: the screen shows exactly the shell\'s one',
   )
@@ -1079,8 +1123,69 @@ test('an unmeasured frame starts the band at the conversation inset floor', () =
   const markup = render(store(MAP, view({ openSessionId: 's1' })))
   assert.match(markup, /style="[^"]*--cm-band-inset:20px/, 'the fallback frame leaves the Conversation header\'s own inset')
   assert.match(markup, /style="[^"]*top:0;/, 'the band starts at its measured box, not at the overlay layer edge')
+  assert.match(
+    markup,
+    /style="[^"]*--cm-band-window-gutter:0px/,
+    'an unmeasured frame must not reserve the window-edge gutter: FALLBACK_FRAME.left is 0, so a gutter that forgot `ready` would indent the first column and then snap back',
+  )
   assert.ok(!markup.includes('--cm-band-inset:160px'), 'the published clearance is not assumed when it cannot be read')
   assert.ok(!markup.includes('--cm-band-inset:124px'), 'and the narrowed-seat inset is never assumed before measurement')
+})
+
+/**
+ * The window-edge gutter is a measured fact, not a platform guess.
+ *
+ * The rule is "the band's left edge is the frame's left edge", which is exactly
+ * `frame.left === 0` in the overlay layer's coordinates — the state map mode
+ * puts macOS and Windows desktop in after the shell's left column collapses to
+ * zero width. It is deliberately not a platform/`data-sidebar-collapsed` test:
+ * the Web client keeps a 56px rail when collapsed, so its band's left edge is a
+ * seam, and indenting from the seam would push its first column off the rail.
+ * `FALLBACK_FRAME` also has `left: 0`, so `ready` gates the first paint.
+ */
+test('the window-edge gutter exists only while the band owns the frame left edge', () => {
+  /** A measured frame; the fields the gutter does not read keep the fallback. */
+  const frame = (overrides = {}) => ({
+    ready: true,
+    left: 0,
+    top: 0,
+    centerWidth: 900,
+    headerHeight: 76,
+    headTop: 10,
+    headHeight: 30,
+    inset: 20,
+    seatWidth: 0,
+    ...overrides,
+  })
+
+  assert.equal(WINDOW_EDGE_GUTTER, 6, '6px completes the shell sidebar\'s 12px window padding over the column\'s own 6px pill inset')
+  assert.equal(windowEdgeGutter(frame({ left: 0 })), 6, 'macOS/Windows desktop with the left column hidden: the band owns the frame edge')
+  assert.equal(windowEdgeGutter(frame({ left: 0.4 })), 6, 'a rounded sub-pixel frame edge is still the frame edge')
+  assert.equal(windowEdgeGutter(frame({ left: 56 })), 0, 'the Web 56px rail puts a seam to the band\'s left, not the window')
+  assert.equal(windowEdgeGutter(frame({ left: 240 })), 0, 'an expanded left column is a seam too')
+  assert.equal(windowEdgeGutter(frame({ ready: false })), 0, 'an unmeasured first paint keeps the shipped geometry')
+})
+
+/**
+ * The strip's start fade is a browser reading, not a render.
+ *
+ * The panel writes `data-scrolled` straight to the strip once columns leave the
+ * start side, so the stylesheet can fade the cut without a re-render; the
+ * server renderer measures nothing and therefore renders no hook. The pure
+ * reading is what this test can pin: the shell's 1px tolerance means a
+ * sub-pixel scroll position is still rest, and only the start side is read —
+ * the end side's cut lands on the band's seam, where the hairline and the
+ * resize handle already state the boundary.
+ */
+test('the strip\'s start fade begins only after a whole pixel of scroll', () => {
+  assert.equal(scrolledFromStart({ scrollLeft: 0 }), false, 'at rest there is no cut to fade')
+  assert.equal(scrolledFromStart({ scrollLeft: 1 }), false, 'a sub-pixel scroll position is not a scroll')
+  assert.equal(scrolledFromStart({ scrollLeft: 1.5 }), true, 'past one whole pixel the start side is cut')
+  assert.equal(scrolledFromStart({ scrollLeft: 318 }), true, 'the reading does not lift once the strip is scrolled far')
+
+  const markup = render(store(undefined, undefined))
+  assert.ok(markup.includes('cm-node-area'), 'the strip is rendered on the server')
+  assert.equal(markup.includes('data-scrolled'), false, 'the fade is a browser reading: no hook is rendered without a measurement')
 })
 
 /**
@@ -1120,8 +1225,44 @@ test('opening a subagent lands on its parent row without leaving the space', () 
   assert.equal(landed.activeSpace, 'sp-work', 'the space does not move')
   assert.equal(landed.selectedNodeId, 'n1', 'the highlight is the parent topic')
   const markup = render(store(SPACES_MAP, landed))
-  assert.match(markup, /class="cm-node-row"[^>]*data-selected="true"[^>]*title="外贸探索"/)
+  assert.match(markup, /class="cm-node-row"[^>]*data-node-id="n1"[^>]*data-selected="true"/)
   assert.ok(!markup.includes('子智能体'), 'no row is invented for the child')
+})
+
+test('a subagent draws its parent\'s identity marks in the tree', () => {
+  // The pane names the child, but the tree has no row for one: it marks the
+  // parent conversation as the conversation being read, so every identity mark
+  // (the one solid row, the home anchor, the home chain) is what the parent
+  // itself would draw. Attention badges are the one thing that deliberately
+  // does not follow — they keep watching the Session that is really open (pinned
+  // by "reading a subagent keeps its parent's attention badge"); this fixture
+  // has no status source, so the whole tree still matches.
+  const landed = followNativeNavigation(
+    SPACES_MAP, SUBAGENT_LINEAGE, SPACES_OWNERS, 'child', 'sp-work',
+    view({ activeSpace: 'sp-work', selectedNodeId: '@ws:w1' }),
+  )
+  const catalog = { ids: [...CATALOG.ids, 'child'], byId: { ...CATALOG.byId, ...SUBAGENT_LINEAGE } }
+  const useCatalog = selector => selector(catalog)
+  const markup = render(store(SPACES_MAP, landed), { useSessions: useCatalog })
+  assert.match(
+    markup,
+    /class="cm-thread-row"[^>]*data-session-id="s1"[^>]*data-selected="true"/,
+    'the parent conversation row is the one being read',
+  )
+  assert.match(
+    markup,
+    /class="cm-thread-row"[^>]*data-session-id="s1"[^>]*aria-current="page"/,
+    'and the only current page in the column',
+  )
+  assert.equal((markup.match(/data-session-home="true"/g) ?? []).length, 1, 'the parent home keeps the anchor')
+  assert.match(
+    markup,
+    /class="cm-node-row"[^>]*data-node-id="n1"[^>]*data-session-path="true"/,
+    'the parent home and its Workspace stay on the home chain',
+  )
+  const asParent = render(store(SPACES_MAP, { ...landed, openSessionId: 's1' }), { useSessions: useCatalog })
+  assert.equal(markup, asParent, 'with no status source, the tree is the tree the parent itself would draw')
+  assert.equal(landed.openSessionId, 'child', 'while the pane and the view still name the subagent')
 })
 
 test('a subagent never pulls the reader into another space', () => {
@@ -1183,6 +1324,130 @@ test('an ordinary conversation still takes the map to its own space', () => {
   assert.equal(landed.activeSpace, 'sp-family', 'a filed conversation switches the space')
   assert.equal(landed.selectedNodeId, '@ws:w2')
   assert.equal(landed.openSessionId, 's3')
+})
+
+test('a fork that is not indexed yet lands on its source topic', () => {
+  // The branch action opens the child before the catalog pass that files it has
+  // run, so the map has no row for the fork yet; its catalog row already names
+  // the source, and the index files the branch there a moment later.
+  const lineage = {
+    s1: { displayTitle: '第一条对话' },
+    fork: { displayTitle: '第一条对话 (1)', parentId: 's1' },
+  }
+  const landed = followNativeNavigation(
+    SPACES_MAP, lineage, SPACES_OWNERS, 'fork', 'sp-work',
+    view({ activeSpace: 'sp-work', selectedNodeId: '@ws:w1' }),
+  )
+  assert.equal(landed.openSessionId, 'fork', 'the pane names the conversation being read')
+  assert.equal(landed.activeSpace, 'sp-work', 'the source topic keeps the space the reader is in')
+  assert.equal(landed.selectedNodeId, 'n1', 'the highlight lands on the source topic, not the Workspace row')
+})
+
+test('a fork of a conversation in another space takes that space', () => {
+  const lineage = {
+    s3: { displayTitle: '第三条对话' },
+    fork: { displayTitle: '第三条对话 (1)', parentId: 's3' },
+  }
+  const landed = followNativeNavigation(
+    SPACES_MAP, lineage, SPACES_OWNERS, 'fork', 'sp-work',
+    view({ activeSpace: 'sp-work', selectedNodeId: 'n1' }),
+  )
+  assert.equal(landed.activeSpace, 'sp-family', 'the source conversation’s space is followed')
+  assert.equal(landed.selectedNodeId, '@ws:w2', 'and the source’s home row')
+})
+
+test('a fork whose source nothing can name falls back to its own accounted Workspace', () => {
+  const lineage = { fork: { displayTitle: '无源分支', parentId: 'ghost' } }
+  const landed = followNativeNavigation(
+    SPACES_MAP, lineage, new Map([['fork', 'w1']]), 'fork', 'sp-family',
+    view({ activeSpace: 'sp-family', selectedNodeId: '@ws:w2' }),
+  )
+  assert.equal(landed.activeSpace, 'sp-work', 'the accounted Workspace is followed')
+  assert.equal(landed.selectedNodeId, '@ws:w1')
+})
+
+test('a fork does not treat a subagent parent as a destination', () => {
+  const lineage = {
+    child: { displayTitle: '子智能体', origin: 'subagent', parentId: 's1' },
+    fork: { displayTitle: '子会话分支', parentId: 'child' },
+  }
+  const landed = followNativeNavigation(
+    SPACES_MAP, lineage, new Map([['fork', 'w1']]), 'fork', 'sp-work',
+    view({ activeSpace: 'sp-work', selectedNodeId: 'n1' }),
+  )
+  assert.equal(landed.selectedNodeId, '@ws:w1', 'the subagent has no row to land on; the fork falls back to its Workspace')
+})
+
+/* ── the tree's position is derived from the open conversation ──────────── */
+
+test('the tree lands on the open conversation’s ungrouped row', () => {
+  const landed = followSessionHome(
+    SPACES_MAP,
+    view({ openSessionId: 's2', selectedNodeId: '@ws:w2', activeSpace: 'sp-family' }),
+    'sp-family',
+  )
+  assert.equal(landed.activeSpace, 'sp-work', 'the conversation’s own space')
+  assert.equal(landed.selectedNodeId, '@loose:sp-work', 'and its ungrouped row')
+})
+
+test('the tree stays put when it already names the home', () => {
+  const start = view({ openSessionId: 's1', selectedNodeId: 'n1', activeSpace: 'sp-work' })
+  assert.equal(followSessionHome(SPACES_MAP, start, 'sp-work'), start, 'same object: no re-render')
+})
+
+test('a browse is left alone', () => {
+  const browsing = view({ openSessionId: 's1', selectedNodeId: '@ws:w1', activeSpace: 'sp-work', browsing: true })
+  assert.equal(followSessionHome(SPACES_MAP, browsing, 'sp-work'), browsing, 'the reader’s excursion is not stolen')
+})
+
+test('nothing open, or a conversation the index does not know, leaves the tree alone', () => {
+  const idle = view({ openSessionId: null, selectedNodeId: 'n1', activeSpace: 'sp-work' })
+  assert.equal(followSessionHome(SPACES_MAP, idle, 'sp-work'), idle)
+  const pending = view({ openSessionId: 'not-indexed', selectedNodeId: 'n1', activeSpace: 'sp-work' })
+  assert.equal(followSessionHome(SPACES_MAP, pending, 'sp-work'), pending)
+})
+
+test('external navigation to an ungrouped conversation lands on its ungrouped row', () => {
+  const landed = followNativeNavigation(
+    SPACES_MAP, CATALOG, SPACES_OWNERS, 's2', 'sp-family',
+    view({ selectedNodeId: '@ws:w2', activeSpace: 'sp-family' }),
+  )
+  assert.equal(landed.activeSpace, 'sp-work')
+  assert.equal(landed.selectedNodeId, '@loose:sp-work')
+  assert.equal(landed.openSessionId, 's2')
+})
+
+test('a conversation event ends the reader’s browse', () => {
+  const landed = followNativeNavigation(
+    SPACES_MAP, CATALOG, SPACES_OWNERS, 's3', 'sp-work',
+    view({ selectedNodeId: 'n1', activeSpace: 'sp-work', browsing: true }),
+  )
+  assert.equal(landed.browsing, false, 'the tree follows again')
+  assert.equal(landed.selectedNodeId, '@ws:w2')
+})
+
+test('landing on an ungrouped conversation draws only the Workspace column', () => {
+  const landed = followNativeNavigation(
+    SPACES_MAP, CATALOG, SPACES_OWNERS, 's2', 'sp-family',
+    view({ selectedNodeId: '@ws:w2', activeSpace: 'sp-family' }),
+  )
+  const markup = render(store(SPACES_MAP, landed))
+  assert.equal(columnCount(markup), 1, 'the ungrouped row is a conversation list, not a container')
+  const row = rowMarkup(markup, 'ungrouped')
+  assert.ok(row.includes('data-row-key="@loose:sp-work"'), 'it is the conversation\'s own space bucket')
+  assert.ok(row.includes('data-selected="true"'), 'and the tree stands on it')
+})
+
+test('a manual row move browses unless it lands on the home row', () => {
+  assert.equal(browsingForRow(SPACES_MAP, 's1', 'n1'), false, 'the home row ends the browse')
+  assert.equal(browsingForRow(SPACES_MAP, 's1', '@ws:w2'), true)
+  assert.equal(browsingForRow(SPACES_MAP, null, 'n1'), false, 'nothing open is no browse')
+})
+
+test('a manual space switch browses unless it returns to the home space', () => {
+  assert.equal(browsingForSpace(SPACES_MAP, 's1', 'sp-work'), false)
+  assert.equal(browsingForSpace(SPACES_MAP, 's1', 'sp-family'), true)
+  assert.equal(browsingForSpace(SPACES_MAP, null, 'sp-family'), false)
 })
 
 /* ── moving a conversation to another node (「移动到…」) ───────────────────── */
@@ -1415,52 +1680,67 @@ test('every draggable row carries the identity the hit test reads', () => {
   assert.ok(markup.includes('data-session-id="s1"'), 'a conversation row names its session')
   assert.ok(markup.includes('data-parent-node-id="n1"'), 'and the topic it is filed under')
   assert.ok(markup.includes('data-dragging="false"'), 'no row is dragged at rest')
-  assert.ok(markup.includes('data-drop="none"'), 'and no row is a drop target at rest')
   assert.ok(markup.includes('data-parent-workspace-id="w2"'), 'a Workspace-level conversation names its Workspace')
 })
 
-test('a row under the pointer becomes the candidate the model judges', () => {
-  assert.deepEqual(
-    candidateFromRow({ nodeId: 'n2', nodeWorkspaceId: 'w1' }, 'into'),
-    { row: { kind: 'node', nodeId: 'n2', workspaceId: 'w1' }, edge: 'into' },
-    'a topic row is its own target',
-  )
-  assert.deepEqual(
-    candidateFromRow({ parentNodeId: 'n2', parentWorkspaceId: 'w1' }, 'after'),
-    { row: { kind: 'node', nodeId: 'n2', workspaceId: 'w1' }, edge: 'after' },
-    'a conversation row targets the topic it is filed under',
-  )
-  assert.deepEqual(
-    candidateFromRow({ parentWorkspaceId: 'w2' }, 'into'),
-    { row: { kind: 'workspace', workspaceId: 'w2' }, edge: 'into' },
-    'a Workspace-level conversation targets its Workspace row',
-  )
-  assert.deepEqual(
-    candidateFromRow({ rowKey: '@ws:w1' }, 'into'),
-    { row: { kind: 'workspace', workspaceId: 'w1' }, edge: 'into' },
-    'a Workspace row is a target for its own Workspace',
-  )
-  assert.deepEqual(
-    candidateFromRow({ nodeId: 'u1', nodeWorkspaceId: '' }, 'into'),
-    { row: { kind: 'node', nodeId: 'u1', workspaceId: null }, edge: 'into' },
-    'a legacy rootless topic is still named, so the model can refuse it',
-  )
-  for (const identity of [{ rowKey: '@ungrouped' }, { rowKey: '@loose:sp-work' }, {}]) {
-    assert.deepEqual(
-      candidateFromRow(identity, 'into'),
-      { row: { kind: 'none' }, edge: 'into' },
-      "the ungrouped bucket and the band's blank edges take no drop",
-    )
-  }
+test('the group wrapper is the drop target, and it names its column', () => {
+  const markup = renderToStaticMarkup(createElement(NodeColumnView, columnProps()))
+  assert.match(markup, /class="cm-node-group"[^>]*data-group-key="node:n1"/, 'the wrapper is the group and keeps a stable key')
+  assert.match(markup, /data-group-kind="node"/, 'the group states what kind of header it has')
+  assert.match(markup, /data-group-column-key="L2"/, 'and which column it lives in')
+  assert.match(markup, /data-group-node-id="n1"/, 'a topic group names its node')
+  assert.match(markup, /data-group-workspace-id="w1"/, 'and the Workspace the hit test must agree with')
+  assert.match(markup, /data-drop-group="none"/, 'at rest no group is a target')
+  assert.ok(!/class="cm-node-row"[^>]*data-drop=/.test(markup), 'rows no longer carry a drop mark of their own')
+  assert.ok(markup.includes('data-parent-workspace-id="w1"'), 'the conversation row carries its topic\'s Workspace (F0)')
 })
 
-test('a row offers its edge bands by a quarter of its height, with an 8px floor', () => {
-  assert.equal(edgeOfRow(102, 100, 34), 'before', 'the top eighth of a topic row is its before-edge')
-  assert.equal(edgeOfRow(117, 100, 34), 'into', 'the middle files under the row')
-  assert.equal(edgeOfRow(132, 100, 34), 'after', 'the bottom eighth is its after-edge')
-  assert.equal(edgeOfRow(104, 100, 20), 'before', 'a short row keeps an 8px edge instead of a 5px one')
-  assert.equal(edgeOfRow(112, 100, 20), 'into', 'and its middle still means "under it"')
-  assert.equal(edgeOfRow(114, 100, 20), 'after')
+test('a group owns its conversation rows and its footer', () => {
+  const row = {
+    ...DRAG_COLUMN.rows[0],
+    threadFooter: createElement('button', { type: 'button', className: 'cm-more-row' }, '显示更多'),
+  }
+  const markup = renderToStaticMarkup(createElement(NodeColumnView, columnProps({
+    column: { ...DRAG_COLUMN, rows: [row] },
+  })))
+  const group = markup.indexOf('data-group-key="node:n1"')
+  const conversation = markup.indexOf('data-session-id="s1"')
+  const footer = markup.indexOf('cm-more-row')
+  assert.ok(group !== -1 && conversation !== -1 && footer !== -1, 'the group, its conversation and its footer all render')
+  assert.ok(group < conversation && conversation < footer, 'both live inside the group, in reading order')
+  assert.equal(markup.split('data-group-key="node:n1"').length - 1, 1, 'one group wrapper, no accidental duplicate')
+
+  const collapsed = renderToStaticMarkup(createElement(NodeColumnView, columnProps({
+    column: { ...DRAG_COLUMN, rows: [{ ...row, collapsed: true }] },
+  })))
+  assert.match(collapsed, /data-group-key="node:n1"[^>]*data-group-collapsed="true"/, 'a collapsed group says so')
+  assert.ok(!collapsed.includes('data-session-id="s1"'), 'and renders only its header: the block is exactly the header')
+})
+
+test('a topic group paints the whole block, and the line lands on the group edge', () => {
+  const target = renderToStaticMarkup(createElement(NodeColumnView, columnProps({
+    dropGroupKey: 'node:n1', dropGroupState: 'valid', dropGroupMode: 'into',
+  })))
+  assert.match(target, /data-group-key="node:n1"[^>]*data-drop-group="valid"/, 'the whole group is the target')
+  assert.match(target, /data-drop-mode="into"/, 'and its intent is into the topic')
+  assert.match(target, /background:color-mix\(in srgb, var\(--dsw-alias-brand-primary/, 'the group card is tinted')
+  assert.match(target, /box-shadow:inset 0 0 0 1px color-mix/, 'with one inner ring around the block')
+  assert.ok(!target.includes('data-insert'), 'an into target promises no sibling slot')
+
+  const reorder = renderToStaticMarkup(createElement(NodeColumnView, columnProps({
+    dropGroupKey: 'node:n1', dropGroupState: 'valid', dropGroupMode: 'after', insertEdge: 'after',
+  })))
+  assert.match(reorder, /data-drop-mode="after"/, 'a group-edge drop keeps its mode')
+  assert.match(reorder, /data-insert="after"/, 'and draws the line on the group boundary')
+  assert.match(reorder, /height:2px/, 'two pixels, as designed')
+  assert.match(reorder, /pointer-events:none/, 'the line never takes the pointer it reports')
+
+  const refused = renderToStaticMarkup(createElement(NodeColumnView, columnProps({
+    dropGroupKey: 'node:n1', dropGroupState: 'invalid',
+  })))
+  assert.match(refused, /data-drop-group="invalid"/, 'a refused group still names the target')
+  assert.ok(!refused.includes('background:color-mix'), 'but is not tinted: the label carries the reason')
+  assert.ok(!refused.includes('data-insert'), 'and no insertion line is promised')
 })
 
 test('only a decision with a real move becomes a plan', () => {
@@ -1517,35 +1797,40 @@ function columnProps(extra = {}) {
   }
 }
 
-test('a drop on a row edge draws the 2px insertion line inside that row', () => {
+test('the drop marks are group-level, and the insertion line sits on the group boundary', () => {
   const before = renderToStaticMarkup(createElement(NodeColumnView, columnProps({
-    dropKey: 'n1', dropState: 'valid', insertEdge: 'before',
+    dropGroupKey: 'node:n1', dropGroupState: 'valid', dropGroupMode: 'before', insertEdge: 'before',
   })))
   assert.match(before, /data-insert="before"/, 'the line is drawn on the edge the pointer chose')
-  assert.match(before, /data-drop="valid"/, 'and the target row is lit')
   assert.match(before, /height:2px/, 'two pixels, as designed')
-  assert.match(before, /position:absolute/, 'inside the row, so it spans the row width')
+  assert.match(before, /position:absolute/, 'inside the group, so it spans the block width')
   assert.match(before, /pointer-events:none/, 'the line never takes the pointer it reports')
-  assert.match(before, /color-mix\(in srgb, var\(--dsw-alias-brand-primary/, 'the row itself is tinted, with the theme token')
-  assert.match(before, /data-dragging="false"/, 'the row is not the one being dragged')
+  assert.match(before, /data-drop-group="valid"/, 'the target group is lit as one block')
+  assert.match(before, /data-drop-mode="before"/, 'with the boundary intent it carries')
 
   const after = renderToStaticMarkup(createElement(NodeColumnView, columnProps({
-    dropKey: 'n1', dropState: 'invalid', insertEdge: 'after',
+    dropGroupKey: 'node:n1', dropGroupState: 'valid', dropGroupMode: 'after', insertEdge: 'after',
   })))
-  assert.match(after, /data-insert="after"/, 'the other edge draws its own line')
-  assert.match(after, /data-drop="invalid"/, 'a refused target says so on its own row')
-  assert.match(after, /cursor:no-drop/, 'with the cursor, not a grey wash (U3)')
-  assert.ok(!after.includes('background:color-mix'), 'a refused row is not tinted')
+  assert.match(after, /data-insert="after"/, 'the other boundary draws its own line')
+  assert.ok(!/class="cm-thread-row"[^>]*data-drop=/.test(after), 'no conversation row is marked as the target')
 
-  const noLine = renderToStaticMarkup(createElement(NodeColumnView, columnProps({ dropKey: 'n1', dropState: 'valid' })))
+  const noLine = renderToStaticMarkup(createElement(NodeColumnView, columnProps({
+    dropGroupKey: 'node:n1', dropGroupState: 'valid', dropGroupMode: 'into',
+  })))
   assert.ok(!noLine.includes('data-insert'), 'a conversation payload draws no line: conversations are not sorted by hand')
 })
 
-test('a dragged row reports itself, and the panel marks the source', () => {
-  const markup = renderToStaticMarkup(createElement(NodeColumnView, columnProps({ draggingKey: 's1' })))
-  assert.match(markup, /data-session-id="s1"[^>]*data-dragging="true"/, 'the conversation row is the source')
-  assert.match(markup, /data-node-id="n1"[^>]*data-dragging="false"/, 'and its topic row is not')
-  assert.match(markup, /data-dragging="true"[^>]*opacity:0.45/, 'the source row steps back while its copy follows the pointer')
+test('a dragged conversation dims its row; a dragged topic dims its whole group', () => {
+  const thread = renderToStaticMarkup(createElement(NodeColumnView, columnProps({ draggingKey: 's1' })))
+  assert.match(thread, /data-session-id="s1"[^>]*data-dragging="true"/, 'the conversation row is the source')
+  assert.match(thread, /data-dragging="true"[^>]*opacity:0.45/, 'the source row steps back while its copy follows the pointer')
+  assert.ok(!/class="cm-node-row"[^>]*data-dragging=/.test(thread), 'the topic row is not dimmed for a conversation drag')
+
+  const topic = renderToStaticMarkup(createElement(NodeColumnView, columnProps({
+    draggingGroupKey: 'node:n1',
+  })))
+  assert.match(topic, /data-group-key="node:n1"[^>]*data-dragging-group="true"/, 'the topic dims its group as one block')
+  assert.match(topic, /data-dragging-group="true"[^>]*opacity:0.45/, 'so its conversations read as travelling with it')
 })
 
 test('the pointer label says what a release would do, in the decisions own tone', () => {
@@ -1565,17 +1850,17 @@ test('the pointer label says what a release would do, in the decisions own tone'
 
 test('a pointer that leaves every row keeps the last candidate, held', () => {
   assert.equal(heldOverlay(null), null, 'nothing to hold before a row was ever reached')
-  const live = { label: '移到「获客方式」下', tone: 'valid', dropKey: 'n2', insertEdge: null, held: false }
+  const live = { label: '移到「获客方式」下', tone: 'valid', groupKey: 'node:n2', mode: 'into', insertEdge: null, held: false }
   assert.deepEqual(heldOverlay(live), { ...live, held: true }, 'the candidate stays, marked as held')
   const held = heldOverlay(live)
   assert.equal(heldOverlay(held), held, 'holding an already held candidate writes nothing new, so no frame re-renders')
 })
 
-test('a held target is drawn as a hint, and its insertion line stays', () => {
+test('a held group is drawn as a hint, and its insertion line stays', () => {
   const markup = renderToStaticMarkup(createElement(NodeColumnView, columnProps({
-    dropKey: 'n1', dropState: 'held', insertEdge: 'before',
+    dropGroupKey: 'node:n1', dropGroupState: 'held', dropGroupMode: 'before', insertEdge: 'before',
   })))
-  assert.match(markup, /data-drop="held"/, 'the row is still the candidate (U3)')
+  assert.match(markup, /data-drop-group="held"/, 'the group is still the candidate (U3)')
   assert.match(markup, /outline:1px dashed/, 'drawn as a hint rather than a live target')
   assert.match(markup, /data-insert="before"/, 'and the line it was showing stays where it was')
 })
@@ -1702,6 +1987,7 @@ test('the move dialog is the marked one', () => {
   assert.equal(dialogClass({ kind: 'move-thread' }), 'cm-dialog cm-dialog--move', 'BL-2: the card says which dialog it is')
   assert.equal(dialogClass({ kind: 'node' }), 'cm-dialog')
   assert.equal(dialogClass({ kind: 'thread-space' }), 'cm-dialog')
+  assert.equal(dialogClass({ kind: 'node-delete', nodeId: 'n1', title: 'x' }), 'cm-dialog', 'the delete confirmation is a plain card')
 })
 
 test('only the five one-line dialogs commit on Enter', () => {
@@ -1709,9 +1995,9 @@ test('only the five one-line dialogs commit on Enter', () => {
     assert.equal(enterCommits(kind), true, `${kind} has a one-line input and commits`)
   }
   // The textarea's dialog keeps Enter for line breaks, the pickers and the move
-  // tree consume it natively, and the two delete confirmations hold no input:
+  // tree consume it natively, and the three delete confirmations hold no input:
   // Enter must never confirm them.
-  for (const kind of ['workspace-delete', 'space-delete', 'move-thread', 'workspace-space', 'thread-space']) {
+  for (const kind of ['workspace-delete', 'space-delete', 'node-delete', 'move-thread', 'workspace-space', 'thread-space']) {
     assert.equal(enterCommits(kind), false, `${kind} must not commit on Enter`)
   }
 })
@@ -1756,6 +2042,32 @@ test('the open conversation is not counted in the attention rollup', () => {
     useSessionStatus: useStatus(statuses),
   })
   assert.ok(!markup.includes('cm-rollup'), 'the only conversation is open, so no row needs a badge')
+})
+
+test('reading a subagent keeps its parent\'s attention badge', () => {
+  // The tree's identity marks name the parent row as the one being read (see
+  // "a subagent draws its parent's marks"), but the attention rollup keeps
+  // reading the Session that is really open: a parent whose turn finished, or
+  // which asks for an answer, must still be able to remind the reader while its
+  // subagent is in front. Only the *parent being open* is exempt — its own
+  // attention is already on screen.
+  const statuses = { s1: { completionUnread: true } }
+  const catalog = {
+    ids: [...CATALOG.ids, 'child'],
+    byId: { ...CATALOG.byId, child: { displayTitle: '子智能体', origin: 'subagent', parentId: 's1' } },
+  }
+  const readingParent = render(store(MAP, view({ selectedNodeId: 'n1', openSessionId: 's1' })), {
+    useSessionStatus: useStatus(statuses),
+  })
+  assert.ok(!readingParent.includes('cm-rollup'), 'the open parent\'s attention is already in front of the reader')
+
+  const readingChild = render(store(MAP, view({ selectedNodeId: 'n1', openSessionId: 'child' })), {
+    useSessionStatus: useStatus(statuses),
+    useSessions: selector => selector(catalog),
+  })
+  assert.match(readingChild, /data-session-home="true"/, 'the tree still marks the parent as the place being read')
+  assert.ok(readingChild.includes('class="cm-rollup"'), 'the parent\'s completion still reaches the tree')
+  assert.ok(readingChild.includes('data-cat="done"'), 'and it stays in the completed category')
 })
 
 test('a narrow column drops the counts and keeps the dots', () => {
@@ -1918,4 +2230,184 @@ test('the search column renders hit notes, one cursor row, and a non-selectable 
   assert.match(markup, /data-node-id="n1"[^>]*data-search-active="true"/, 'the cursor sits on the navigable hit')
   assert.match(markup, /data-node-id="@matches"[^>]*data-selectable="false"/, 'the group heading is not selectable')
   assert.match(markup, /…关键词…/, 'the conversation snippet is rendered too')
+})
+
+test('the create dialog states its location as a read-only chain, never a picker', () => {
+  const ancestors = [
+    { id: 'n1', workspaceId: 'w1', parentId: null, position: 1, title: '外贸探索', description: '' },
+    { id: 'n2', workspaceId: 'w1', parentId: 'n1', position: 1, title: '获客方式', description: '' },
+  ]
+  const markup = renderToStaticMarkup(createElement(NodeLocationRail, { workspaceLabel: 'alpha', ancestors }))
+  assert.match(markup, /class="cm-loc-rail"[^>]*role="group"/, 'the rail is a group with its own accessible name')
+  assert.match(markup, /alpha/, 'the Workspace root is named')
+  assert.match(markup, /外贸探索/, 'the grandparent stays visible')
+  assert.match(markup, /获客方式/, 'the parent stays visible')
+  assert.match(markup, /aria-label="将创建在 alpha \/ 外贸探索 \/ 获客方式"/, 'the accessible name carries the full path')
+  assert.doesNotMatch(markup, /<select/, 'the rail is not a picker')
+  assert.doesNotMatch(markup, /新节点/, 'the redundant create-target hint is gone')
+  assert.doesNotMatch(markup, /焦点|tabindex/, 'the read-only rail never enters the Tab order')
+
+  const top = renderToStaticMarkup(createElement(NodeLocationRail, { workspaceLabel: 'alpha', ancestors: [] }))
+  assert.match(top, /aria-label="将创建在 alpha 工作区顶层"/, 'top-level create names the Workspace top level')
+  assert.doesNotMatch(top, /新节点/, 'top-level create carries no extra target hint either')
+})
+
+test('create requires a non-blank title and says 创建; edit still says 保存', () => {
+  assert.equal(nodeTitleIssue(''), 'required', 'an empty title blocks creation')
+  assert.equal(nodeTitleIssue('   '), 'required', 'a whitespace-only title blocks creation')
+  assert.equal(nodeTitleIssue('首屏加载优化'), null, 'a real title passes')
+  const createDraft = { kind: 'node', workspaceId: 'w1', parentId: null, title: '', description: '' }
+  assert.equal(dialogPrimaryLabel(t, createDraft), '创建', 'the create dialog creates')
+  assert.equal(dialogPrimaryLabel(t, { ...createDraft, id: 'n1', title: '已有节点' }), '保存', 'the edit dialog saves')
+  assert.equal(dialogPrimaryLabel(t, { kind: 'workspace-create', path: '' }), '创建', 'other create dialogs are unchanged')
+  assert.equal(dialogPrimaryLabel(t, { kind: 'node-delete', nodeId: 'n1', title: '外贸探索' }), '删除', 'delete dialogs keep their verb')
+})
+
+/** {@link MAP} plus one archived block (a1 > a2) and one independently archived conversation. */
+const ARCHIVE_MAP = {
+  version: 2,
+  revision: 3,
+  nodes: [
+    { id: 'n1', parentId: null, workspaceId: 'w1', title: '外贸探索', description: '', position: 1, updatedAt: '' },
+    { id: 'n2', parentId: 'n1', workspaceId: 'w1', title: '获客方式', description: '', position: 1, updatedAt: '' },
+    {
+      id: 'a1', parentId: null, workspaceId: 'w1', title: '旧项目', description: '', position: 2, updatedAt: '',
+      archivedAt: '2026-10-01T00:00:00.000Z', archivedParentId: 'n1',
+    },
+    { id: 'a2', parentId: 'a1', workspaceId: 'w1', title: '旧方案', description: '', position: 1, updatedAt: '' },
+  ],
+  threads: [
+    { sessionId: 's1', nodeId: 'n1', workspaceId: 'w1', title: '第一条对话', updatedAt: ago(2), importedAt: '' },
+    { sessionId: 's2', nodeId: null, workspaceId: null, title: '散落对话', updatedAt: ago(2), importedAt: '' },
+    { sessionId: 's3', nodeId: null, workspaceId: 'w2', title: '第三条对话', updatedAt: ago(1), importedAt: '' },
+    { sessionId: 'sa1', nodeId: 'a1', workspaceId: 'w1', title: '归档内的对话', updatedAt: ago(1), importedAt: '' },
+    {
+      sessionId: 'sa2', nodeId: 'n1', workspaceId: 'w1', title: '单独归档的对话', updatedAt: ago(1), importedAt: '',
+      archivedAt: '2026-10-02T00:00:00.000Z',
+    },
+  ],
+}
+
+test('the archive row is a fixed footer of the Workspace topic column', () => {
+  const markup = render(store(ARCHIVE_MAP, view({ selectedNodeId: '@ws:w1' })))
+  assert.equal(columnCount(markup), 2, 'the Workspace column and its topic column')
+  assert.match(markup, /class="cm-col-footer"/, 'the archive row sits outside the scrolling rows')
+  assert.match(markup, /data-kind="archive"/, 'it is the synthetic archive row')
+  assert.match(markup, /data-row-key="@archive:w1"/, 'its selection key names the Workspace')
+  assert.match(markup, />已归档</, 'the row is named')
+  assert.match(markup, /title="已归档 2 条会话 · 1 个主题"/, 'the count is conversations, with topics in the tooltip')
+  assert.ok(!markup.includes('旧项目'), 'archived content stays out of the active columns until the row is opened')
+})
+
+test('an empty archive still offers the row, with an empty-state tooltip', () => {
+  const markup = render(store(MAP, view({ selectedNodeId: '@ws:w1' })))
+  assert.match(markup, /data-kind="archive"/, 'the row is fixed even with nothing put away')
+  assert.match(markup, /title="归档旧的节点或会话后会出现在这里"/, 'it says how it fills up')
+})
+
+test('selecting the archive row opens the archive column: blocks then standalone conversations', () => {
+  const markup = render(store(ARCHIVE_MAP, view({ selectedNodeId: '@archive:w1' })))
+  assert.equal(columnCount(markup), 3, 'Workspace column, topic column, archive column')
+  assert.match(markup, /class="cm-col-title" title="L3"/, 'the archive column is one level deeper')
+  assert.match(markup, /旧项目/, 'the archived block root is listed')
+  assert.ok(!markup.includes('旧方案'), 'the block is not flattened: its child comes with the block, not beside it')
+  assert.match(markup, /已归档会话/, 'independently archived conversations get their own group')
+  assert.match(markup, /单独归档的对话/, 'and their title is listed')
+  assert.match(markup, /data-group-archived="true"/, 'archived rows are marked for the drag hit test')
+})
+
+test('selecting an archived topic unfolds through the archive, and archived topics grow no topics', () => {
+  const markup = render(store(ARCHIVE_MAP, view({ selectedNodeId: 'a1' })))
+  assert.equal(columnCount(markup), 4, "Workspace, topics, archive, then the archived block's children")
+  assert.match(markup, /class="cm-col-title" title="L4"/, "the block's children sit below the archive column")
+  assert.match(markup, /旧方案/, "the archived block's child is listed")
+  assert.equal((markup.match(/class="cm-col-actions"/g) ?? []).length, 2, 'only the active columns offer adding')
+  assert.match(markup, /data-selected="true"[^>]*data-node-id="a1"|data-node-id="a1"[^>]*data-selected="true"/, 'the archived node carries the selection')
+})
+
+test('the archive row offers no start action and no menu', () => {
+  // The footer is the last thing in the two-column view (the archive column is
+  // closed), so the slice from it to the end is exactly one row.
+  const markup = render(store(ARCHIVE_MAP, view({ selectedNodeId: '@ws:w1' })))
+  const footer = markup.slice(markup.indexOf('class="cm-col-footer"'))
+  assert.ok(footer.includes('data-kind="archive"'), 'the footer is the archive row')
+  assert.ok(!footer.includes('aria-label="发起对话"'), 'the archive never starts conversations')
+  assert.ok(!footer.includes('aria-label="更多操作"'), 'the archive row has no menu of its own')
+})
+
+test('archiving keeps the reader’s row; only a selection inside the block moves up', () => {
+  assert.equal(selectionAfterArchive(MAP, 'n2', null), null, 'no selection stays no selection')
+  assert.equal(selectionAfterArchive(MAP, 'n2', 'n1'), 'n1', 'another row keeps its selection')
+  assert.equal(selectionAfterArchive(MAP, 'n2', 'n2'), 'n1', 'the archived child hands the cursor to its parent')
+  assert.equal(selectionAfterArchive(MAP, 'n1', 'n1'), '@ws:w1', 'an archived root hands the cursor to its Workspace row')
+})
+
+test('an empty archive row opens no empty column and is not a selection target', () => {
+  const markup = render(store(MAP, view({ selectedNodeId: '@archive:w1' })))
+  assert.equal(columnCount(markup), 2, 'no empty third column is drawn for an empty archive')
+  const footer = markup.slice(markup.indexOf('class="cm-col-footer"'))
+  assert.match(footer, /data-row-key="@archive:w1"[\s\S]{0,1600}?data-selectable="false"/,
+    'the placeholder row is not a selectable container')
+})
+
+test('a row title lives in full in the label, with no native tooltip to double it', () => {
+  const markup = render(store(MAP, view({ selectedNodeId: 'n1', openSessionId: 's1' })))
+  assert.match(markup, /class="cm-row-label">外贸探索</, 'the full title is the label text, so the hover tip has words to show')
+  assert.match(markup, /class="cm-row-label">第一条对话</)
+  /* The archive footer is the one exception: its native title is an explanation
+     of the row, not the row's own clipped label, so it must survive. */
+  const rows = [...markup.matchAll(/<div class="cm-node-row"[^>]*>/g)].map(match => match[0])
+  assert.ok(rows.length > 0, 'the fixture renders node rows')
+  assert.ok(
+    rows.filter(row => !row.includes('data-kind="archive"')).every(row => !row.includes(' title="')),
+    'an ordinary node row must not fall back to the browser tooltip',
+  )
+  const threads = [...markup.matchAll(/<div class="cm-thread-row"[^>]*>/g)].map(match => match[0])
+  assert.ok(threads.length > 0 && threads.every(row => !row.includes(' title="')), 'a conversation row neither')
+  assert.ok(!markup.includes('class="cm-tip"'), 'the bubble only exists while a clipped row is hovered')
+})
+
+test('the archive row keeps its native explanatory title', () => {
+  const markup = render(store(MAP, view({ selectedNodeId: '@ws:w1' })))
+  const footer = markup.slice(markup.indexOf('class="cm-col-footer"'))
+  assert.match(footer, /data-kind="archive"[^>]*title="归档旧的节点或会话后会出现在这里"/,
+    'the system row still explains itself with the browser tooltip')
+})
+
+test('a clipped title tip opens below its row and stays inside the window', () => {
+  const viewport = { width: 1200, height: 900 }
+  const below = titleTipPlacement(
+    { left: 120, top: 200, right: 340, bottom: 234 },
+    { width: 260, height: 26 },
+    viewport,
+  )
+  assert.deepEqual(below, { left: 120, top: 240, side: 'bottom' }, 'there is room below the row, so the bubble drops')
+})
+
+test('a title tip near the right edge is pulled left to keep its gutter', () => {
+  const at = titleTipPlacement(
+    { left: 1000, top: 200, right: 1180, bottom: 234 },
+    { width: 260, height: 26 },
+    { width: 1200, height: 900 },
+  )
+  assert.equal(at.left, 928, 'the bubble right edge stops at the 12px window gutter')
+})
+
+test('a title tip with no room below flips above its row', () => {
+  const at = titleTipPlacement(
+    { left: 120, top: 846, right: 340, bottom: 880 },
+    { width: 260, height: 26 },
+    { width: 1200, height: 900 },
+  )
+  assert.deepEqual(at, { left: 120, top: 814, side: 'top' }, 'the bubble opens upward instead of running off screen')
+})
+
+test('a title tip wider than the window stays pinned at the gutter', () => {
+  const at = titleTipPlacement(
+    { left: 2, top: 100, right: 180, bottom: 134 },
+    { width: 900, height: 40 },
+    { width: 800, height: 900 },
+  )
+  assert.equal(at.left, 12, 'a clamped bubble keeps the left gutter rather than sliding off screen')
+  assert.equal(at.top, 140, 'and still drops below its row')
 })

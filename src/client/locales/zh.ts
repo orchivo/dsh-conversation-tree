@@ -9,6 +9,7 @@ import { columns } from './zh/columns.js'
 import { common } from './zh/common.js'
 import { drag } from './zh/drag.js'
 import { entries } from './zh/entries.js'
+import { home } from './zh/home.js'
 import { model } from './zh/model.js'
 import { panel } from './zh/panel.js'
 import { search } from './zh/search.js'
@@ -22,6 +23,7 @@ export const zh = {
   ...common,
   ...drag,
   ...entries,
+  ...home,
   ...model,
   ...panel,
   ...search,

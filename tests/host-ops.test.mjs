@@ -28,6 +28,37 @@ function seed() {
   return created.state
 }
 
+/** Fixed archive stamp shared by the archived fixture items. */
+const ARCHIVED_AT = '2026-01-01T00:00:00.000Z'
+
+/** Predicate for the archive write/read refusal code. */
+const isArchived = error => error.name === 'MapToolError' && error.code === 'ARCHIVED'
+
+/**
+ * A document with an active tree plus one fully archived block.
+ *
+ * Active: `goal` → `child`, with `s-active` filed under `goal`.
+ * Archive: the detached root `archived` with descendant `archived-child`;
+ * `s-inside` sits under that descendant without a mark of its own (N2) and
+ * `s-loose` is archived directly on the Workspace row.
+ * @returns the map document.
+ */
+function seedArchived() {
+  let state = seed()
+  state = createNode(state, { parentId: 'goal', title: 'child', id: 'child' }).state
+  state = createNode(state, { parentId: null, workspaceId: WORKSPACE, title: 'archived topic', id: 'archived' }).state
+  state = createNode(state, { parentId: 'archived', title: 'archived child', id: 'archived-child' }).state
+  state = adoptThread(state, { sessionId: 's-active', title: 'active talk', nodeId: 'goal', workspaceId: WORKSPACE })
+  state = adoptThread(state, { sessionId: 's-inside', title: 'inside talk', nodeId: 'archived-child', workspaceId: WORKSPACE })
+  state = adoptThread(state, { sessionId: 's-loose', title: 'loose talk', nodeId: null, workspaceId: WORKSPACE })
+  return {
+    ...state,
+    nodes: state.nodes.map(node =>
+      node.id === 'archived' ? { ...node, parentId: null, archivedAt: ARCHIVED_AT, archivedParentId: null } : node),
+    threads: state.threads.map(thread => thread.sessionId === 's-loose' ? { ...thread, archivedAt: ARCHIVED_AT } : thread),
+  }
+}
+
 test('createNodes builds a nested batch in one transition and echoes refs', () => {
   const doc = seed()
   const outcome = createNodes(doc, {
@@ -161,12 +192,15 @@ test('deleteNodes deletes leaves, refuses parents in leaf mode, and expands subt
   assert.equal(subtree.doc.nodes.length, 0)
 })
 
-test('deleteNodes unassigns conversations filed under a deleted node', () => {
+test('deleteNodes unassigns conversations filed anywhere in a deleted subtree', () => {
   const doc = seed()
   const child = createNode(doc, { parentId: 'goal', title: 'child' })
-  const filed = adoptThread(child.state, { sessionId: 's-1', title: 'talk', nodeId: child.id, workspaceId: WORKSPACE })
-  const outcome = deleteNodes(filed, { nodeIds: [child.id], mode: 'subtree' })
-  assert.equal(outcome.doc.threads[0].nodeId, null)
+  const grandchild = createNode(child.state, { parentId: child.id, title: 'grandchild' })
+  const filed = adoptThread(grandchild.state, { sessionId: 's-1', title: 'talk', nodeId: child.id, workspaceId: WORKSPACE })
+  const deeper = adoptThread(filed, { sessionId: 's-2', title: 'deeper talk', nodeId: grandchild.id, workspaceId: WORKSPACE })
+  const outcome = deleteNodes(deeper, { nodeIds: ['goal'], mode: 'subtree' })
+  assert.deepEqual(outcome.doc.threads.map(thread => thread.nodeId), [null, null], 'every filed conversation is unassigned, at any depth')
+  assert.deepEqual(outcome.doc.threads.map(thread => thread.title), ['talk', 'deeper talk'], 'the conversations themselves stay in the index')
 })
 
 test('attachSessions files sessions under a node and rejects foreign workspaces', () => {
@@ -302,4 +336,124 @@ test('viewState projects a bounded subtree and workspace-level counts', () => {
   const workspaceView = viewState(state, { workspaceId: WORKSPACE, depth: 1 }).value
   assert.equal(workspaceView.nodes.length, 1)
   assert.equal(workspaceView.nodes[0].id, 'goal')
+})
+
+test('viewState hides archived topics and conversations and reports only their totals', () => {
+  const doc = seedArchived()
+
+  const summary = viewState(doc, { depth: 1 }).value
+  assert.deepEqual(summary.archived, { nodes: 1, sessions: 2 }, 'one archived topic and two hidden conversations')
+  assert.deepEqual(summary.workspaces, [{ workspaceId: WORKSPACE, nodeCount: 2, threadCount: 1 }], 'only active content is counted')
+
+  const workspaceView = viewState(doc, { workspaceId: WORKSPACE, depth: 3 }).value
+  assert.deepEqual(workspaceView.nodes.map(node => node.id), ['goal'], 'the archived root is not a workspace topic')
+  assert.equal(workspaceView.nodes[0].childCount, 1)
+  assert.deepEqual(workspaceView.archived, { nodes: 1, sessions: 2 })
+
+  const subtree = viewState(doc, { nodeId: 'goal', depth: 3 }).value
+  assert.deepEqual(subtree.nodes[0].children.map(node => node.id), ['child'])
+  assert.deepEqual(subtree.archived, { nodes: 1, sessions: 2 })
+})
+
+test('viewState reports ARCHIVED for an explicitly named archived topic or descendant', () => {
+  const doc = seedArchived()
+  for (const nodeId of ['archived', 'archived-child']) {
+    assert.throws(() => viewState(doc, { nodeId, depth: 1 }), isArchived, `${nodeId} is hidden by the archive`)
+  }
+  assert.throws(
+    () => viewState(doc, { nodeId: 'ghost', depth: 1 }),
+    error => error.name === 'MapToolError' && error.code === 'NOT_FOUND',
+    'a genuinely missing id is still NOT_FOUND',
+  )
+})
+
+test('createNodes and updateNodes refuse archived targets without writing', () => {
+  const doc = seedArchived()
+
+  assert.throws(
+    () => createNodes(doc, { workspaceId: WORKSPACE, parentId: 'archived', nodes: [{ title: 'child' }] }, idFactory()),
+    isArchived,
+  )
+  assert.throws(
+    () => createNodes(doc, { workspaceId: WORKSPACE, parentId: 'archived-child', nodes: [{ title: 'child' }] }, idFactory()),
+    isArchived,
+  )
+
+  for (const nodeId of ['archived', 'archived-child']) {
+    assert.throws(() => updateNodes(doc, { updates: [{ nodeId, title: 'renamed' }] }), isArchived)
+  }
+  // One archived id rejects the whole batch and leaves the input document alone.
+  assert.throws(
+    () => updateNodes(doc, { updates: [{ nodeId: 'goal', title: 'renamed' }, { nodeId: 'archived', title: 'no' }] }),
+    isArchived,
+  )
+  assert.equal(doc.nodes.find(node => node.id === 'goal').title, 'goal')
+})
+
+test('deleteNodes refuses archived nodes before removing anything', () => {
+  const doc = seedArchived()
+  for (const nodeId of ['archived', 'archived-child']) {
+    assert.throws(() => deleteNodes(doc, { nodeIds: [nodeId], mode: 'subtree' }), isArchived)
+    assert.throws(() => deleteNodes(doc, { nodeIds: [nodeId], mode: 'leaf' }), isArchived)
+  }
+  assert.throws(
+    () => deleteNodes(doc, { nodeIds: ['child', 'archived'], mode: 'subtree' }),
+    isArchived,
+    'a mixed batch never removes the active node either',
+  )
+  assert.equal(doc.nodes.length, 4)
+})
+
+test('moveNodes refuses an archived source, target parent, or anchor', () => {
+  const doc = seedArchived()
+
+  assert.throws(() => moveNodes(doc, { moves: [{ nodeId: 'archived', parentId: null }] }), isArchived, 'archived source')
+  assert.throws(() => moveNodes(doc, { moves: [{ nodeId: 'archived-child', parentId: 'goal' }] }), isArchived, 'archived descendant source')
+  assert.throws(() => moveNodes(doc, { moves: [{ nodeId: 'goal', parentId: 'archived' }] }), isArchived, 'archived target parent')
+  assert.throws(() => moveNodes(doc, { moves: [{ nodeId: 'goal', beforeNodeId: 'archived' }] }), isArchived, 'archived anchor')
+  assert.throws(
+    () => moveNodes(doc, { moves: [{ nodeId: 'child', parentId: null }, { nodeId: 'archived', parentId: null }] }),
+    isArchived,
+    'one archived move rejects the whole batch',
+  )
+  assert.equal(doc.nodes.find(node => node.id === 'child').parentId, 'goal')
+})
+
+test('moveSessions refuses an archived target node and rejects hidden conversations per id', () => {
+  const doc = seedArchived()
+
+  assert.throws(() => moveSessions(doc, { nodeId: 'archived', sessionIds: ['s-active'] }), isArchived)
+  assert.throws(() => moveSessions(doc, { nodeId: 'archived-child', sessionIds: ['s-active'] }), isArchived)
+
+  const outcome = moveSessions(doc, { nodeId: 'child', sessionIds: ['s-active', 's-inside', 's-loose'] })
+  assert.deepEqual(outcome.value.moved, ['s-active'], 'only the visible conversation moves')
+  assert.deepEqual(
+    outcome.value.rejected.map(entry => [entry.sessionId, entry.code]),
+    [['s-inside', 'ARCHIVED'], ['s-loose', 'ARCHIVED']],
+  )
+  // Hidden conversations keep their filing: no partial write leaks out of the archive.
+  assert.equal(outcome.doc.threads.find(thread => thread.sessionId === 's-inside').nodeId, 'archived-child')
+  assert.equal(outcome.doc.threads.find(thread => thread.sessionId === 's-loose').nodeId, null)
+
+  // A workspace-row target (nodeId omitted) still refuses hidden conversations.
+  const toRow = moveSessions(doc, { nodeId: null, sessionIds: ['s-inside'] })
+  assert.deepEqual(toRow.value.moved, [])
+  assert.deepEqual(toRow.value.rejected.map(entry => entry.code), ['ARCHIVED'])
+})
+
+test('attachSessions refuses an archived target node and rejects hidden conversations per id', () => {
+  const doc = seedArchived()
+
+  assert.throws(() => attachSessions(doc, { nodeId: 'archived', sessionIds: ['s-new'] }), isArchived)
+  assert.throws(() => attachSessions(doc, { nodeId: 'archived-child', sessionIds: ['s-new'] }), isArchived)
+
+  const outcome = attachSessions(doc, { nodeId: 'child', sessionIds: ['s-inside', 's-loose', 's-new'] })
+  assert.deepEqual(outcome.value.attached, ['s-new'], 'only the visible session is adopted')
+  assert.deepEqual(
+    outcome.value.rejected.map(entry => [entry.sessionId, entry.code]),
+    [['s-inside', 'ARCHIVED'], ['s-loose', 'ARCHIVED']],
+  )
+  assert.equal(outcome.doc.threads.find(thread => thread.sessionId === 's-new').nodeId, 'child')
+  assert.equal(outcome.doc.threads.find(thread => thread.sessionId === 's-inside').nodeId, 'archived-child')
+  assert.equal(outcome.doc.threads.find(thread => thread.sessionId === 's-loose').nodeId, null)
 })

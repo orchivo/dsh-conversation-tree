@@ -11,7 +11,10 @@
  * imports only the types and the text helpers, so the two halves agree on the
  * snippet shape without sharing a runtime.
  */
-import { findTextMatch, nodePath, type MapNode, type MapState, type SearchResults, type ThreadRef } from './model.js'
+import {
+  findTextMatch, inArchive, isArchivedThread, nodePath,
+  type MapNode, type MapState, type SearchResults, type ThreadRef,
+} from './model.js'
 
 /** One plain-text span with the matched run isolated, ready for `<mark>`. */
 export interface SearchSnippet {
@@ -102,6 +105,8 @@ export interface SearchNodeItem {
   snippet: SearchSnippet | null
   /** Whether the node's title carried the query (ranks above description hits). */
   titleMatch: boolean
+  /** Whether the node lives in its Workspace's archive (marked itself or below a marked root). */
+  archived: boolean
 }
 
 /** One conversation hit, already ranked and annotated. */
@@ -118,6 +123,8 @@ export interface SearchThreadItem {
   titleMatch: boolean
   /** Whether one of its messages matched. */
   bodyMatch: boolean
+  /** Whether the conversation was archived on its own or is filed inside an archived topic. */
+  archived: boolean
 }
 
 /** The flat result view: nodes first, then conversations, in navigation order. */
@@ -138,6 +145,8 @@ export interface SearchContextLabels {
   untitled: string
   /** Fallback when a Workspace title is missing from the input map. */
   workspaceFallback: string
+  /** The "Archived" segment an archived hit's context line carries. */
+  archived: string
 }
 
 /** Injectable context the search view needs from the panel. */
@@ -161,7 +170,14 @@ function byActivity(left: { updatedAt: string }, right: { updatedAt: string }): 
   return Date.parse(right.updatedAt) - Date.parse(left.updatedAt)
 }
 
-/** Build the `工作区 / 上级 / …` line for one node hit. */
+/**
+ * Build the `工作区 / 上级 / …` line for one node hit.
+ *
+ * A hit inside the archive is labelled where it lives: the Workspace, then the
+ * archive row, then the path inside the block. Without that segment the line
+ * would name a chain the reader cannot see in the active tree — the archived
+ * root is detached, so the hit's ancestors are the block's own path.
+ */
 function nodeContext(
   state: MapState,
   node: MapNode,
@@ -172,10 +188,17 @@ function nodeContext(
     ? labels.ungrouped
     : workspaceTitles[node.workspaceId] ?? labels.workspaceFallback
   const ancestors = nodePath(state, node.id).slice(0, -1).map(pathNode => pathNode.title)
+  if (inArchive(state, node.id)) return [workspace, labels.archived, ...ancestors].join(' / ')
   return ancestors.length === 0 ? workspace : `${workspace} / ${ancestors.join(' / ')}`
 }
 
-/** Build the `工作区 / 节点路径` line for one conversation hit. */
+/**
+ * Build the `工作区 / 节点路径` line for one conversation hit.
+ *
+ * An archived conversation shows the archive row in place of the active chain;
+ * when it is filed inside an archived block, the block's path still tells the
+ * reader which topic it belongs to, so that path follows the archive segment.
+ */
 function threadContext(
   state: MapState,
   thread: ThreadRef,
@@ -185,9 +208,22 @@ function threadContext(
   const workspace = thread.workspaceId === null || thread.workspaceId === undefined
     ? labels.ungrouped
     : workspaceTitles[thread.workspaceId] ?? labels.workspaceFallback
-  if (thread.nodeId === null) return workspace
-  const path = nodePath(state, thread.nodeId).map(pathNode => pathNode.title)
-  return path.length === 0 ? workspace : `${workspace} / ${path.join(' / ')}`
+  const nodeArchived = thread.nodeId !== null && inArchive(state, thread.nodeId)
+  if (!isArchivedThread(thread) && !nodeArchived) {
+    if (thread.nodeId === null) return workspace
+    const path = nodePath(state, thread.nodeId).map(pathNode => pathNode.title)
+    return path.length === 0 ? workspace : `${workspace} / ${path.join(' / ')}`
+  }
+  const parts = [workspace, labels.archived]
+  if (nodeArchived && thread.nodeId !== null) {
+    parts.push(...nodePath(state, thread.nodeId).map(pathNode => pathNode.title))
+  }
+  return parts.join(' / ')
+}
+
+/** Whether one conversation is stored in its Workspace's archive. */
+function threadInArchive(state: MapState, thread: ThreadRef): boolean {
+  return isArchivedThread(thread) || (thread.nodeId !== null && inArchive(state, thread.nodeId))
 }
 
 /**
@@ -215,6 +251,7 @@ export function buildSearchView(input: SearchViewInput): SearchView {
       ? null
       : snippetAround(hit.node.description, hit.descriptionMatch.start, hit.descriptionMatch.end),
     titleMatch: hit.titleMatch,
+    archived: inArchive(state, hit.node.id),
   })).sort((left, right) => {
     if (left.titleMatch !== right.titleMatch) return left.titleMatch ? -1 : 1
     return byActivity(left.node, right.node) || left.node.title.localeCompare(right.node.title)
@@ -240,6 +277,7 @@ export function buildSearchView(input: SearchViewInput): SearchView {
     snippet: body?.snippet ?? null,
     titleMatch,
     bodyMatch: body !== undefined,
+    archived: threadInArchive(state, thread),
   })
 
   for (const thread of titleMatchedThreads.values()) {

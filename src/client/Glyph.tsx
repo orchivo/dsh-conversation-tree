@@ -63,25 +63,6 @@ export function SearchGlyph({ size = 16 }: { size?: number }): ReactNode {
 }
 
 /**
- * The product's own conversation mark: a speech bubble with two text lines.
- *
- * The application already uses this geometry for a Session (`ChatLines` in its
- * icon set), so the view switch can say "会话" with the same symbol a reader
- * meets everywhere else.
- * @param props - square edge in pixels.
- * @returns the glyph.
- */
-export function SessionGlyph({ size = 16 }: { size?: number }): ReactNode {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.4} strokeLinecap="round" aria-hidden="true">
-      <path d="M5 6.75H11" />
-      <path d="M5 9H8" />
-      <path d="M2.37 11.25C1.59 9.89 1.32 8.3 1.62 6.76C1.92 5.22 2.76 3.84 4 2.88C5.23 1.91 6.77 1.43 8.34 1.51C9.9 1.59 11.39 2.24 12.51 3.32C13.64 4.41 14.34 5.87 14.48 7.43C14.61 8.99 14.18 10.55 13.26 11.82C12.34 13.09 10.99 13.98 9.46 14.33C8.19 14.63 6.86 14.53 5.65 14.06C5.17 13.87 4.77 13.49 4.27 13.4C3.67 13.28 2.95 13.56 2.04 14.33" />
-    </svg>
-  )
-}
-
-/**
  * The band's own mark: fold the column back to the left edge.
  *
  * The band is a column of the centre that the shipped Conversation keeps

@@ -37,6 +37,8 @@ const TRANSLATED_ERROR_CODES = new Set([
   'HAS_CHILDREN',
   'SUBAGENT',
   'SPACE',
+  // archive guards (a target inside the reader's archive is folded away)
+  'ARCHIVED',
   // client-side failures raised by the entry/store
   'STORE_LOADING',
   'PICKER_MACOS',

@@ -21,7 +21,26 @@ export interface NodeView {
 /** Everything the navigation needs to come back the way the user left it. */
 export interface ViewState {
   version: 1
+  /**
+   * Where the tree stands: a topic id, `@ws:<workspaceId>`, a space's ungrouped
+   * row, or the archive row.
+   *
+   * The tree's position is derived from the open conversation (see
+   * `sessionHomeRow`); this field is that derived position, not an independent
+   * cursor. {@link ViewState.browsing} is the one exception — the reader's own
+   * move.
+   */
   selectedNodeId: string | null
+  /**
+   * Whether the reader moved the tree off the open conversation's home.
+   *
+   * Node-row and search-result clicks are the only writes that set it: the tree
+   * follows, the conversation does not. It is transient on purpose — it is never
+   * restored, so a reload starts by following the current conversation again,
+   * and any conversation event (open, create, external navigation, the session
+   * gaining a home) clears it.
+   */
+  browsing: boolean
   /** Nodes whose conversations are hidden. Everything else shows them. */
   collapsedIds: string[]
   /** Whether the navigation is folded to its rail. */
@@ -60,6 +79,7 @@ export function emptyView(): ViewState {
   return {
     version: 1,
     selectedNodeId: null,
+    browsing: false,
     collapsedIds: [],
     navCollapsed: false,
     openSessionId: null,
@@ -176,6 +196,9 @@ export function parseViewState(text: string | null): ViewState {
     return {
       ...emptyView(),
       ...stored,
+      // A restored view never resumes a browse: the tree catches up with the
+      // current conversation on the first catalog pass instead.
+      browsing: false,
       selectedNodeId: parsed.selectedNodeId === '@inbox' ? UNGROUPED_ID : parsed.selectedNodeId,
       columnWidths: Array.isArray(parsed.columnWidths) ? parsed.columnWidths.map(width => clampColumnWidth(width)) : [],
       mapWidth: clampMapWidth(parsed.mapWidth, MAX_MAP_WIDTH),

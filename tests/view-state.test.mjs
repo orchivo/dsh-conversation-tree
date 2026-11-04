@@ -33,6 +33,17 @@ function store() {
   }
 }
 
+test('a fresh view is not browsing', () => {
+  assert.equal(emptyView().browsing, false)
+})
+
+test('a restored view never resumes a browse', () => {
+  const restored = parseViewState(JSON.stringify({ ...emptyView(), browsing: true, openSessionId: 's1', selectedNodeId: 'n1' }))
+  assert.equal(restored.browsing, false, 'the tree catches up with the current conversation')
+  assert.equal(restored.selectedNodeId, 'n1', 'the stored tree position still renders first')
+  assert.equal(restored.openSessionId, 's1')
+})
+
 test('a fresh view is unfolded, empty, and remembers nothing', () => {
   const view = emptyView()
   assert.equal(view.selectedNodeId, null)

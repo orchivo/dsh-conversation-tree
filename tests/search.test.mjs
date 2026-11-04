@@ -10,7 +10,7 @@
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
 
-import { createNode, ensureDefaultSpace, emptyMap, searchMap, syncThreads } from '../lib/model.js'
+import { archiveNode, archiveThread, assignThreads, createNode, ensureDefaultSpace, emptyMap, searchMap, syncThreads } from '../lib/model.js'
 import { buildSearchView, findTextMatch, snippetAround } from '../lib/search.js'
 
 /** One map with two workspaces, nested nodes, and three conversations. */
@@ -39,8 +39,27 @@ function view(state, query, contentHits) {
     candidateThreads: state.threads,
     workspaceTitles: TITLES,
     contentHits,
-    labels: { ungrouped: '未分组', untitled: '未命名对话', workspaceFallback: '工作区' },
+    labels: { ungrouped: '未分组', untitled: '未命名对话', workspaceFallback: '工作区', archived: '已归档' },
   })
+}
+
+/**
+ * The fixture plus one Workspace archive: a two-level block (`n5 > n6`), a
+ * conversation filed inside it, and one archived on its own. Search still covers
+ * all of it; the context line is what has to say where the hit was stored.
+ */
+function archivedFixture() {
+  let state = fixture()
+  state = createNode(state, { parentId: null, workspaceId: 'w1', title: '旧项目', description: '归档旧项目', id: 'n5' }).state
+  state = createNode(state, { parentId: 'n5', title: '旧子题', description: '', id: 'n6' }).state
+  state = syncThreads(state, [
+    { id: 'blocked', displayTitle: '归档关键词 块内', updatedAt: 3000 },
+    { id: 'loose', displayTitle: '归档关键词 独立', updatedAt: 2000 },
+  ], null, new Map([['blocked', 'w1'], ['loose', 'w1']]))
+  state = assignThreads(state, ['blocked'], 'n6')
+  state = archiveThread(state, 'loose')
+  state = archiveNode(state, 'n5')
+  return state
 }
 
 test('findTextMatch is case-insensitive and returns the original range', () => {
@@ -149,4 +168,46 @@ test('an unknown query produces an empty view', () => {
   const result = view(state, '完全不存在')
   assert.equal(result.empty, true)
   assert.deepEqual(result.items, [])
+})
+
+test('an archived node hit is marked and names the archive path', () => {
+  const state = archivedFixture()
+  const result = view(state, '旧')
+  const byKey = new Map(result.nodes.map(item => [item.key, item]))
+  assert.equal(byKey.get('n5').archived, true, 'the block root is archived')
+  assert.equal(byKey.get('n5').context, '外贸工作区 / 已归档')
+  assert.equal(byKey.get('n6').archived, true, 'a descendant is archived through its root')
+  assert.equal(byKey.get('n6').context, '外贸工作区 / 已归档 / 旧项目', 'the path inside the block follows the archive segment')
+  assert.equal(view(state, '获客').nodes[0].archived, false, 'an active node stays unmarked')
+})
+
+test('an archived conversation hit is marked and names the archive path', () => {
+  const state = archivedFixture()
+  const result = view(state, '归档关键词')
+  const byKey = new Map(result.threads.map(item => [item.thread.sessionId, item]))
+  assert.equal(byKey.get('blocked').archived, true, 'a conversation inside a block is archived without a mark of its own')
+  assert.equal(byKey.get('blocked').context, '外贸工作区 / 已归档 / 旧项目 / 旧子题')
+  assert.equal(byKey.get('loose').archived, true, 'a conversation archived on its own is marked')
+  assert.equal(byKey.get('loose').context, '外贸工作区 / 已归档')
+  assert.equal(view(state, '外贸对话一').threads[0].archived, false, 'an active conversation stays unmarked')
+})
+
+test('search still matches archived titles and descriptions', () => {
+  const state = archivedFixture()
+  assert.deepEqual(searchMap(state, '旧项目').nodes.map(hit => hit.node.id), ['n5'], 'an archived title is searchable')
+  assert.deepEqual(searchMap(state, '归档旧项目').nodes.map(hit => hit.node.id), ['n5'], 'so is its description')
+  assert.deepEqual(searchMap(state, '块内').threads.map(hit => hit.thread.sessionId), ['blocked'], 'and an archived conversation title')
+})
+
+test('a body hit inside the archive carries the archive context too', () => {
+  const state = archivedFixture()
+  const hits = new Map([['blocked', {
+    sessionId: 'blocked',
+    messages: 1,
+    snippet: { before: '', match: '锚点', after: '' },
+  }]])
+  const result = view(state, '锚点', hits)
+  assert.equal(result.threads[0].thread.sessionId, 'blocked')
+  assert.equal(result.threads[0].archived, true)
+  assert.equal(result.threads[0].context, '外贸工作区 / 已归档 / 旧项目 / 旧子题')
 })

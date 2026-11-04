@@ -7,6 +7,7 @@ import { columns } from './en/columns.js'
 import { common } from './en/common.js'
 import { drag } from './en/drag.js'
 import { entries } from './en/entries.js'
+import { home } from './en/home.js'
 import { model } from './en/model.js'
 import { panel } from './en/panel.js'
 import { search } from './en/search.js'
@@ -21,6 +22,7 @@ export const en: Record<keyof typeof zh, string> = {
   ...common,
   ...drag,
   ...entries,
+  ...home,
   ...model,
   ...panel,
   ...search,
