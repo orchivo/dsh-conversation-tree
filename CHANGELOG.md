@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 — 2026-11-05
+
+**Listing metadata release — no code, UI or data-format changes.**
+
+- **The one-line introduction leads with what the band does for the reader.** DSH's plugin list, the plugin's detail page and `npm` all show a single clamped line, so it now opens with the offer: «把 DSH 的对话列表变成一棵可折叠的树：按「工作区 → 主题 → 对话」归类，拖动即可整理，状态一眼可见，9 个模型工具让助手替你维护。» `locale/zh.json` and `locale/en.json` carry the same sentence per language, so an English UI shows the English sentence.
+- **`package.json` carries the same sentence, and declares `author`.** npm pages and directory crawlers no longer have to infer the owner from the repository URL.
+- **The market index that lists this plugin** (a separate repository) gained a category, three labels («9 model tools», «Archive», «Bilingual UI») and search keywords, so DSH's Discover card can show tags and match feature words.
+- Nothing else changed: no dependency, no build-output difference, and `$DSH_HOME/conversation-map/map.json` keeps its format — the tree behaves exactly as in 0.2.0.
+
 ## 0.2.0 — 2026-11-04
 
 **The tree now follows the conversation, and organisation gets its 0.2.0 shape: drag, a shelf per Workspace, a home chain, and a quieter band chrome.**
