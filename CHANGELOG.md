@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 — 2026-11-05
+
+**The new-workspace dialog names what it creates, and its picker no longer janks.**
+
+- **A Workspace can be named while it is created.** The dialog under the `L1` column's ＋ carries a «Workspace name» field below the directory. It follows the directory's final segment until the reader edits it, so picking a folder still fills the name it would get anyway; a name the reader typed wins. Because the Host's `workspaces.create` only takes a path, the typed name is applied with `workspaces.rename` once the directory resolves: an untouched name never renames a directory that is already registered (typing a known path is adoption, not a rename), and a duplicate name is refused in the dialog before the Host rejects it — the registration itself stays, because registering the directory was the request and only the name failed; the row stays selected and the dialog stays open so the reader can try another name. A directory with no final segment (the filesystem root) asks for a name instead of inventing one. The rule mirrors the sibling «Add project» dialog — the directory proposes a name, the reader confirms it.
+- **Clicking «Choose directory…» makes no visible change until the panel opens.** The click used to drop the path field's focus ring, gray the button out and insert a hint line; the card then grew and re-centred (`top:50%`), so the field visibly moved during the pause before the OS panel appeared — while the native entry shows nothing in that pause. The button now keeps its look and the path field keeps focus (`mousedown` default prevented), the pending fact goes to a visually hidden live region, a second click cannot open a second panel, and the picked directory still fills the path and (untouched) name when the panel returns. The wait itself is the system panel's own latency; the plugin adds no visible state of its own before it.
+
+No data-format or contract change: `map.json` keeps its format, the nine model tools are unchanged, and the previous "type the path and go" flow still works — the name simply follows the directory.
+
 ## 0.2.1 — 2026-11-05
 
 **Listing metadata release — no code, UI or data-format changes.**

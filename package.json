@@ -1,6 +1,6 @@
 {
   "name": "dsh-conversation-tree",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "对话树 / Conversation Tree：把 DSH 的对话列表变成一棵可折叠的树——按「工作区 → 主题 → 对话」归类，拖动整理、状态一眼可见，9 个模型工具让助手替你维护。",
   "author": "orchivo",
   "license": "MIT",

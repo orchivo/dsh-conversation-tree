@@ -24,6 +24,9 @@ import {
   nodeTitleIssue, planFromDecision, scrolledFromStart, selectionAfterArchive, showsStatusRollup, siblingTargets, springLoadTarget, threadMenuModel, threadMoveChange,
   threadMoveDefault, threadMoveIsNoop, threadMoveOptions, titleTipPlacement, treeStep, visibleTreeRows, SpaceMenuTrailing,
   overlayOffset, nextSpaceBreadcrumbDensity, spaceBreadcrumbDensities, WINDOW_EDGE_GUTTER, windowEdgeGutter,
+  workspaceCreateName,
+  workspaceNameFromPath,
+  workspaceTitleTaken,
 } from '../lib/panel.js'
 import { MapError } from '../lib/model.js'
 import { ensureDefaultSpace, parseMapState, syncCatalog } from '../lib/model.js'
@@ -2232,6 +2235,27 @@ test('the search column renders hit notes, one cursor row, and a non-selectable 
   assert.match(markup, /…关键词…/, 'the conversation snippet is rendered too')
 })
 
+test('a Workspace create dialog resolves its name before the Host runs', () => {
+  assert.equal(workspaceCreateName({ path: '/home/me/projects/alpha', title: '', titleTouched: false }), 'alpha', 'the directory names it')
+  assert.equal(workspaceCreateName({ path: '/home/me/projects/alpha', title: 'Alpha 计划', titleTouched: true }), 'Alpha 计划', 'a typed name wins')
+  assert.equal(workspaceCreateName({ path: '/home/me/projects/alpha', title: '  ', titleTouched: true }), '', 'a cleared name names nothing')
+  assert.equal(workspaceCreateName({ path: '/', title: '', titleTouched: false }), '', 'a root has no name to offer')
+  const workspaces = [{ workspaceId: 'w1', title: '任务地图' }, { workspaceId: 'w2', title: '项目 B' }]
+  assert.equal(workspaceTitleTaken(workspaces, 'w2', '任务地图'), true, 'another row carrying the name conflicts')
+  assert.equal(workspaceTitleTaken(workspaces, 'w1', '任务地图'), false, 'a row never conflicts with itself')
+  assert.equal(workspaceTitleTaken(workspaces, 'w1', '新名字'), false, 'an unused name does not conflict')
+})
+
+test('a directory names its Workspace until the reader names it', () => {
+  assert.equal(workspaceNameFromPath('/home/hello/projects/task-map'), 'task-map', 'the final segment names the directory')
+  assert.equal(workspaceNameFromPath('/home/hello/projects/task-map/'), 'task-map', 'a trailing separator is not a segment')
+  assert.equal(workspaceNameFromPath('C:\\projects\\alpha\\\\'), 'alpha', 'the other separator works too')
+  assert.equal(workspaceNameFromPath('/'), '', 'a root names nothing')
+  assert.equal(workspaceNameFromPath('   '), '', 'a blank path names nothing')
+  assert.equal(workspaceNameFromPath('/home/hello/我的 项目/'), '我的 项目', 'the name may be non-ASCII and hold spaces')
+  assert.equal(workspaceNameFromPath('/home/hello/projects/'), 'projects', 'the name is not trimmed away')
+})
+
 test('the create dialog states its location as a read-only chain, never a picker', () => {
   const ancestors = [
     { id: 'n1', workspaceId: 'w1', parentId: null, position: 1, title: '外贸探索', description: '' },
@@ -2259,7 +2283,7 @@ test('create requires a non-blank title and says 创建; edit still says 保存'
   const createDraft = { kind: 'node', workspaceId: 'w1', parentId: null, title: '', description: '' }
   assert.equal(dialogPrimaryLabel(t, createDraft), '创建', 'the create dialog creates')
   assert.equal(dialogPrimaryLabel(t, { ...createDraft, id: 'n1', title: '已有节点' }), '保存', 'the edit dialog saves')
-  assert.equal(dialogPrimaryLabel(t, { kind: 'workspace-create', path: '' }), '创建', 'other create dialogs are unchanged')
+  assert.equal(dialogPrimaryLabel(t, { kind: 'workspace-create', path: '', title: '', titleTouched: false }), '创建', 'other create dialogs are unchanged')
   assert.equal(dialogPrimaryLabel(t, { kind: 'node-delete', nodeId: 'n1', title: '外贸探索' }), '删除', 'delete dialogs keep their verb')
 })
 

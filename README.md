@@ -73,6 +73,10 @@ Install the DSH plugin dsh-conversation-tree for me:
 - **Bilingual UI** — Simplified Chinese and English, following **Settings → General → Language** and switching live, no restart.
 - **Resizable and remembered** — drag the band's right edge (minimum 320px); the conversation column keeps its own minimum width and is never squeezed away.
 
+## What's new in 0.3.0
+
+- **Name a Workspace while you create it** — the `L1` column's ＋ dialog now has a «Workspace name» field under the directory: it fills in from the directory's final segment and can be edited, an already-registered directory keeps its name unless you change it, and a duplicate name is refused in the dialog. The directory picker also stopped moving the dialog while the system panel opens.
+
 ## What's new in 0.2.0
 
 - **The tree follows the conversation** — opening, creating or externally navigating to a conversation always lands the tree on that conversation's home (its topic, its Workspace row, the space's «Ungrouped» row or its «Archived» row); ungrouped conversations no longer leave the tree on another branch, and clicking a topic row stays a temporary browse that a reload forgets.

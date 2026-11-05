@@ -288,7 +288,21 @@ type Draft =
      */
     archived?: boolean
   }
-  | { kind: 'workspace-create'; path: string }
+  | {
+    kind: 'workspace-create'
+    path: string
+    /** The name this Workspace should carry; `''` until a directory yields one. */
+    title: string
+    /**
+     * Whether the reader edited the name by hand.
+     *
+     * An untouched name follows the directory's basename — and never renames a
+     * directory that is already registered, because typing a known path is
+     * adoption, not a rename. A name the reader typed is an explicit intent and
+     * is applied after the Workspace resolves.
+     */
+    titleTouched: boolean
+  }
   | { kind: 'workspace-rename'; workspaceId: string; title: string }
   | { kind: 'workspace-delete'; workspaceId: string; title: string }
   | { kind: 'space-create'; title: string }
@@ -2897,6 +2911,17 @@ function MapPanelView(props: MapPanelProps): ReactNode {
     }
     const path = draft.path.trim()
     if (path === '') { setDialogError(t('panel.error.workspacePathEmpty')); return }
+    // The directory names the Workspace by default, but the field is the
+    // outcome: a name the reader typed is applied after the Host resolves the
+    // directory, because `create` cannot carry a name. A name the reader
+    // cleared is an explicit "no name" and is refused like any blank title; an
+    // untouched name never renames a directory that is already registered —
+    // typing a known path is adoption, not a rename.
+    // The field is the outcome: a typed name wins, an untouched field asks the
+    // directory to name it, and a field the reader cleared is an explicit "no
+    // name" — refused like any blank title.
+    const workspaceName = workspaceCreateName(draft)
+    if (workspaceName === '') { setDialogError(t('panel.error.workspaceTitleEmpty')); return }
     setBusy(true)
     void (async () => {
       try {
@@ -2918,10 +2943,24 @@ function MapPanelView(props: MapPanelProps): ReactNode {
           setError(t('panel.error.workspaceInOtherSpace', { space: owner?.title ?? t('panel.otherSpace') }))
           return
         }
+        // The row exists now, so the tree shows where it went before the name
+        // round-trip: if the Host refuses the name, the directory is still
+        // registered, the row is still selected, and the dialog stays open for
+        // another name — registering the directory was the request, only the
+        // name failed.
         if (activeSpaceId !== defaultSpaceId) {
           services.store.update(current => setWorkspaceSpace(current, created.workspaceId, activeSpaceId))
         }
         select(workspaceKey(created.workspaceId))
+        if (draft.titleTouched && workspaceName !== created.title) {
+          // The Host refuses a duplicate title; asking here first answers in the
+          // reader's language, and the predicate mirrors the Host's own rule.
+          if (workspaceTitleTaken(services.workspaces.list.getSnapshot().items, created.workspaceId, workspaceName)) {
+            setDialogError(t('panel.error.workspaceTitleDup', { title: workspaceName }))
+            return
+          }
+          await services.workspaces.rename(created.workspaceId, workspaceName)
+        }
         closeDraft()
       } catch (thrown) {
         setDialogError(describeError(t, thrown))
@@ -3594,7 +3633,25 @@ function MapPanelView(props: MapPanelProps): ReactNode {
   /** Open the Workspace-adoption dialog. */
   const openWorkspaceCreate = (): void => {
     setDialogError('')
-    setDraft({ kind: 'workspace-create', path: '' })
+    setDraft({ kind: 'workspace-create', path: '', title: '', titleTouched: false })
+  }
+
+  /**
+   * Set the dialog's directory; an untouched name follows it.
+   *
+   * The name field is a proposal, not a second input the reader has to keep in
+   * sync: picking a directory must fill the name it would get anyway, while a
+   * name the reader typed stays theirs when they re-pick.
+   * @param path - the typed or picked directory.
+   */
+  const setWorkspaceCreatePath = (path: string): void => {
+    setDraft(current => current === null || current.kind !== 'workspace-create'
+      ? current
+      : {
+          ...current,
+          path,
+          title: current.titleTouched ? current.title : workspaceNameFromPath(path),
+        })
   }
 
   /** Fill the dialog path from the desktop shell's or the Host's directory chooser. */
@@ -3606,7 +3663,7 @@ function MapPanelView(props: MapPanelProps): ReactNode {
     void (async () => {
       try {
         const picked = await services.pickDirectory?.()
-        if (picked !== null && picked !== undefined) setDraft({ kind: 'workspace-create', path: picked })
+        if (picked !== null && picked !== undefined) setWorkspaceCreatePath(picked)
       } catch (thrown) {
         // Every failure here is recoverable by hand: the field beside the
         // button takes an absolute path, so the guidance rides the message.
@@ -4589,18 +4646,46 @@ function MapPanelView(props: MapPanelProps): ReactNode {
                         value={draft.path}
                         autoFocus
                         placeholder="~/projects/…"
-                        onChange={(event) => { setDraft({ kind: 'workspace-create', path: event.target.value }) }}
+                        onChange={(event) => { setWorkspaceCreatePath(event.target.value) }}
                         onKeyDown={commitOnEnter}
                         onCompositionStart={onCompositionStart}
                         onCompositionEnd={onCompositionEnd}
                       />
                       {services.pickDirectory !== undefined && (
-                        <button type="button" className="cm-btn" disabled={picking} onClick={chooseDirectory}>{t('panel.chooseDirectory')}</button>
+                        <button
+                          type="button"
+                          className="cm-btn"
+                          aria-busy={picking || undefined}
+                          // The click must leave the card exactly as it was
+                          // until the OS panel appears: taking focus dropped
+                          // the path field's ring, and the old disabled style
+                          // plus an extra hint line changed the card's height
+                          // and re-centred it — visible movement during the
+                          // wait, while native shows nothing at all.
+                          onMouseDown={(event) => { event.preventDefault() }}
+                          onClick={chooseDirectory}
+                        >
+                          {t('panel.chooseDirectory')}
+                        </button>
                       )}
                     </div>
-                    {picking && (
-                      <p className="cm-hint">{t('panel.pickerPending')}</p>
-                    )}
+                    {picking && <span className="cm-sr-only" role="status">{t('panel.pickerPending')}</span>}
+                  </div>
+                  <div className="cm-field">
+                    <label htmlFor="cm-workspace-create-title">{t('panel.workspaceName')}</label>
+                    <input
+                      id="cm-workspace-create-title"
+                      className="cm-input"
+                      value={draft.title}
+                      placeholder={t('panel.workspaceNamePlaceholder')}
+                      onChange={(event) => {
+                        setDraft({ ...draft, title: event.target.value, titleTouched: true })
+                      }}
+                      onKeyDown={commitOnEnter}
+                      onCompositionStart={onCompositionStart}
+                      onCompositionEnd={onCompositionEnd}
+                    />
+                    <p className="cm-hint">{t('panel.workspaceNameHint')}</p>
                   </div>
                 </>
               )}
@@ -4796,6 +4881,57 @@ function dialogTitle(t: Translate, draft: Draft): string {
   if (draft.kind === 'thread-space') return t('panel.dialog.threadSpace')
   if (draft.kind === 'move-thread') return t('panel.dialog.moveThread')
   return draft.id === undefined ? t('panel.dialog.nodeCreate') : t('panel.dialog.nodeEdit')
+}
+
+/**
+ * The default Workspace name a directory yields: its final path segment.
+ *
+ * Trailing separators are ignored so a path pasted from a file manager's
+ * breadcrumb ("/srv/projects/alpha/") names the directory itself rather
+ * than an empty segment, and both separators are accepted because the field may
+ * carry a path copied from another platform. A root ("/") has no segment: the
+ * reader has to name that Workspace themselves.
+ * @param path - the typed or picked directory.
+ * @returns the basename, or `''` when the path names no segment.
+ */
+export function workspaceNameFromPath(path: string): string {
+  const trimmed = path.trim().replace(/[\\/]+$/u, '')
+  const segment = trimmed.split(/[\\/]/u).pop() ?? ''
+  return segment.trim()
+}
+
+/**
+ * The name a Workspace-create dialog intends, before the Host resolves the path.
+ *
+ * The name field is the outcome, not a second input to keep in sync: a name the
+ * reader typed wins, an untouched field asks the directory to name it, and a
+ * field the reader cleared is an explicit "no name" — refused as a blank title.
+ * @param draft - the create draft's path, name and whether the name was edited.
+ * @returns the intended name, or `''` when it names nothing.
+ */
+export function workspaceCreateName(draft: { path: string; title: string; titleTouched: boolean }): string {
+  const typed = draft.title.trim()
+  if (typed !== '') return typed
+  return draft.titleTouched ? '' : workspaceNameFromPath(draft.path)
+}
+
+/**
+ * Whether another Workspace already carries this name.
+ *
+ * The Host refuses a duplicate title when renaming; asking here first lets the
+ * dialog answer in the reader's language. The Workspace being named never
+ * conflicts with itself.
+ * @param items - the Host's Workspace rows.
+ * @param exceptId - the Workspace being named.
+ * @param name - the intended title.
+ * @returns whether another row carries that title.
+ */
+export function workspaceTitleTaken(
+  items: readonly { workspaceId: string; title: string }[],
+  exceptId: string | null,
+  name: string,
+): boolean {
+  return items.some(workspace => workspace.workspaceId !== exceptId && workspace.title === name)
 }
 
 /**

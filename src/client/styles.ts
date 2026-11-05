@@ -601,6 +601,10 @@ html[data-platform="darwin"][data-conversation-map-split] [data-sidebar-collapse
    pill beside the seat is .cm-seat-hint — the two rules shared this name once,
    and the pill's absolute placement leaked into every dialog's body copy. */
 .cm-hint{margin:0;font-size:11px;line-height:1.55;color:var(--dsw-alias-label-secondary,currentColor)}
+/* Visually hidden, still announced. The directory picker's wait state makes no
+   visible change on purpose (the card must not move before the OS panel
+   appears), so this live region is the one place that says a request went out. */
+.cm-sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 /* The one lead sentence of a confirmation, one step above the body copy, so the
    question reads before the consequences below it. */
 .cm-dialog-lead{margin:0;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary,currentColor)}
